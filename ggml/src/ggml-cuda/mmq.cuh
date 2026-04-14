@@ -4015,12 +4015,12 @@ static __global__ void mul_mat_q(
 
     constexpr int ITER_K = get_iter_k(type);
 
-    const     int64_t blocks_per_ne00 = ncols_x / qk;
-    constexpr int     blocks_per_iter = ITER_K / qk;
+    const int     blocks_per_ne00 = ncols_x / qk;
+    constexpr int blocks_per_iter = ITER_K / qk;
 
     // kbc == k block continuous, current index in continuous ijk space.
-    int64_t kbc      = (int64_t) blockIdx.x     *nsamples_y*nchannels_y*ntx*nty*blocks_per_ne00 / gridDim.x;
-    int64_t kbc_stop = (int64_t)(blockIdx.x + 1)*nsamples_y*nchannels_y*ntx*nty*blocks_per_ne00 / gridDim.x;
+    int kbc      = blockIdx.x * nsamples_y * nchannels_y * ntx * nty * blocks_per_ne00 / gridDim.x;
+    int kbc_stop = (blockIdx.x + 1) * nsamples_y * nchannels_y * ntx * nty * blocks_per_ne00 / gridDim.x;
 
     kbc      -= (kbc      % blocks_per_ne00) % blocks_per_iter;
     kbc_stop -= (kbc_stop % blocks_per_ne00) % blocks_per_iter;
