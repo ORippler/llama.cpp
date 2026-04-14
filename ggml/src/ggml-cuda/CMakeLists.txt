@@ -106,8 +106,10 @@ if (CUDAToolkit_FOUND)
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
     file(GLOB   SRCS "template-instances/fattn-mma*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
-    file(GLOB   SRCS "template-instances/mmq*.cu")
-    list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    # Temporary compile-time reduction: only build MMQ instances for Q8_0 and NVFP4.
+    list(APPEND GGML_SOURCES_CUDA
+        template-instances/mmq-instance-q8_0.cu
+        template-instances/mmq-instance-nvfp4.cu)
     file(GLOB   SRCS "template-instances/mmf*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
 
@@ -183,7 +185,7 @@ if (CUDAToolkit_FOUND)
 
     set(CUDA_CXX_FLAGS "")
 
-    set(CUDA_FLAGS -use_fast_math -extended-lambda)
+    set(CUDA_FLAGS -use_fast_math -extended-lambda -keep -src-in-ptx)
 
     if (GGML_CUDA_DEBUG)
         list(APPEND CUDA_FLAGS -lineinfo)
