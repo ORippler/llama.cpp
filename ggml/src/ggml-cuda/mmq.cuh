@@ -3721,7 +3721,6 @@ static __device__ __forceinline__ void mul_mat_q_process_tile_pipelined(const ch
 
     float sum[sum_elems] = { 0.0f };
 
-    const bool is_producer      = warp_id < producer_nwarps;
     const bool is_consumer      = warp_id >= producer_nwarps;
     const int  producer_warp_id = warp_id;
     const int  consumer_warp_id = warp_id - producer_nwarps;
@@ -3730,18 +3729,20 @@ static __device__ __forceinline__ void mul_mat_q_process_tile_pipelined(const ch
 
     constexpr auto scope          = cuda::thread_scope_block;
     constexpr int  num_stages     = 2;
-    constexpr uint32_t producer_count = producer_nwarps * warp_size;
     __shared__ cuda::pipeline_shared_state<scope, num_stages> pipe_state;
-    auto pipe = cuda::make_pipeline(tb, &pipe_state, producer_count);
+    const auto warp_tile     = cg::tiled_partition<128>(tb);
+    const bool is_producer   = warp_tile.meta_group_rank() == 0;
+    auto pipe = cuda::make_pipeline(
+        tb, &pipe_state, is_producer ? cuda::pipeline_role::producer : cuda::pipeline_role::consumer);
 
     if (is_producer) {
         pipe.producer_acquire();
         // Preload stage 0 y for kb0_start
         const int * by0_preload = y + ncols_y * (kb0_start * qk / ne_block) * sz;
 
-        cuda::memcpy_async(tb, tile_y_stage00, by0_preload, cuda::aligned_size_t<16>(smem_y_stage_bytes), pipe);
+        cuda::memcpy_async(warp_tile, tile_y_stage00, by0_preload, cuda::aligned_size_t<16>(smem_y_stage_bytes), pipe);
         const int * by1 = y + ncols_y * ((kb0_start * qk / ne_block) * sz + sz);
-        cuda::memcpy_async(tb, tile_y_stage01, by1, cuda::aligned_size_t<16>(smem_y_stage_bytes), pipe);
+        cuda::memcpy_async(warp_tile, tile_y_stage01, by1, cuda::aligned_size_t<16>(smem_y_stage_bytes), pipe);
 
         // Preload stage 0 x for kb0_start
         load_tiles_nvfp4_producer<mmq_y, need_check, producer_nwarps>(
@@ -3771,10 +3772,10 @@ static __device__ __forceinline__ void mul_mat_q_process_tile_pipelined(const ch
                 const int * by_next       = y + ncols_y * (kb0_next * qk / ne_block) * sz;
                 pipe.producer_acquire();
 
-                cuda::memcpy_async(tb, next_y_stage0, by_next, cuda::aligned_size_t<16>(smem_y_stage_bytes), pipe);
+                cuda::memcpy_async(warp_tile, next_y_stage0, by_next, cuda::aligned_size_t<16>(smem_y_stage_bytes), pipe);
                 const int * by_next2 = y + ncols_y * ((kb0_next * qk / ne_block) * sz + sz);
 
-                cuda::memcpy_async(tb, next_y_stage1, by_next2, cuda::aligned_size_t<16>(smem_y_stage_bytes), pipe);
+                cuda::memcpy_async(warp_tile, next_y_stage1, by_next2, cuda::aligned_size_t<16>(smem_y_stage_bytes), pipe);
 
                 load_tiles_nvfp4_producer<mmq_y, need_check, producer_nwarps>(x, next_x_stage,
                                                                               offset_x + kb0_next, tile_x_max_i,
