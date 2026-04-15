@@ -947,20 +947,25 @@ static __device__ __forceinline__ void load_tiles_nvfp4_producer(const char * __
 
         const block_nvfp4 * bxi = (const block_nvfp4 *) x + kb0 + i * stride + kbx;
         const uint32_t * __restrict__ src_qs = reinterpret_cast<const uint32_t *>(bxi->qs);
+        const uint32_t src_d = get_int_b4(bxi->d, 0);
         const int kqs = 16 * kbx;
         const int ksc = 4 * kbx;
+        const int row_qs = i * MMQ_MMA_TILE_X_K_NVFP4 + kqs;
+        const int row_df = i * MMQ_MMA_TILE_X_K_NVFP4 + ksc;
 
 #pragma unroll
         for (int sub = 0; sub < QK_NVFP4 / QK_NVFP4_SUB; ++sub) {
             const int2 q0 = get_int_from_table_16(src_qs[2 * sub + 0], kvalues_mxfp4);
             const int2 q1 = get_int_from_table_16(src_qs[2 * sub + 1], kvalues_mxfp4);
 
-            x_qs[i * MMQ_MMA_TILE_X_K_NVFP4 + kqs + 4 * sub + 0] = q0.x;
-            x_qs[i * MMQ_MMA_TILE_X_K_NVFP4 + kqs + 4 * sub + 1] = q1.x;
-            x_qs[i * MMQ_MMA_TILE_X_K_NVFP4 + kqs + 4 * sub + 2] = q0.y;
-            x_qs[i * MMQ_MMA_TILE_X_K_NVFP4 + kqs + 4 * sub + 3] = q1.y;
-            x_df[i * MMQ_MMA_TILE_X_K_NVFP4 + ksc + sub] = ggml_cuda_ue4m3_to_fp32(bxi->d[sub]);
+            reinterpret_cast<int4 *>(x_qs + row_qs)[sub] = make_int4(q0.x, q1.x, q0.y, q1.y);
         }
+
+        reinterpret_cast<float4 *>(x_df + row_df)[0] = make_float4(
+            ggml_cuda_ue4m3_to_fp32((src_d >>  0) & 0xFF),
+            ggml_cuda_ue4m3_to_fp32((src_d >>  8) & 0xFF),
+            ggml_cuda_ue4m3_to_fp32((src_d >> 16) & 0xFF),
+            ggml_cuda_ue4m3_to_fp32((src_d >> 24) & 0xFF));
     }
 #else
     GGML_UNUSED_VARS(x, x_tile, kb0, i_max, stride, producer_warp_id, lane_id);
