@@ -741,6 +741,7 @@ static const struct ggml_type_traits type_traits[GGML_TYPE_COUNT] = {
         .blck_size                = QK_NVFP4,
         .type_size                = sizeof(block_nvfp4),
         .is_quantized             = true,
+        .is_derived               = true,
         .to_float                 = (ggml_to_float_t) dequantize_row_nvfp4,
         .from_float_ref           = (ggml_from_float_t)quantize_row_nvfp4_ref,
     },
@@ -928,6 +929,96 @@ const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {
     assert(type >= 0);
     assert(type < GGML_TYPE_COUNT);
     return &type_traits[type];
+}
+
+void ggml_dequantize_tensor_to_f32(
+        const struct ggml_tensor * tensor,
+        const void               * data,
+              float              * out,
+              int64_t              n) {
+    GGML_ASSERT(tensor != NULL);
+    GGML_ASSERT(data != NULL);
+    GGML_ASSERT(out != NULL);
+    GGML_ASSERT(n >= 0);
+
+    const struct ggml_type_traits * tt = ggml_get_type_traits(tensor->type);
+    GGML_ASSERT(tt->to_float != NULL);
+
+    tt->to_float(data, out, n);
+
+    const struct ggml_tensor * w_scale_t = ggml_get_weight_scale(tensor);
+    if (w_scale_t == NULL) {
+        return;
+    }
+
+    const float * w_scale = (const float *) w_scale_t->data;
+    GGML_ASSERT(w_scale != NULL);
+
+    if (ggml_nelements(w_scale_t) == 1) {
+        const float s = w_scale[0];
+        for (int64_t i = 0; i < n; ++i) {
+            out[i] *= s;
+        }
+        return;
+    }
+
+    // Row-wise scales are indexed by logical rows of the tensor. For views, view_offs is
+    // already flattened against the leaf, so derive the starting row from the leaf row stride.
+    const struct ggml_tensor * leaf = tensor->view_src != NULL ? tensor->view_src : tensor;
+    GGML_ASSERT(leaf->nb[1] > 0);
+
+    const int64_t row_size   = tensor->ne[0];
+    const int64_t n_rows     = row_size > 0 ? (n / row_size) : 0;
+    const int64_t row_offset = tensor->view_src != NULL ? (int64_t) (tensor->view_offs / leaf->nb[1]) : 0;
+
+    GGML_ASSERT(row_size > 0);
+    GGML_ASSERT(n_rows * row_size == n);
+
+    for (int64_t row = 0; row < n_rows; ++row) {
+        const float s = w_scale[row_offset + row];
+        for (int64_t col = 0; col < row_size; ++col) {
+            out[row*row_size + col] *= s;
+        }
+    }
+}
+
+// For derived types (e.g. NVFP4), the leaf tensor stores scales in src[0]/src[1].
+// Views (view_src != NULL) automatically point to the same leaf because ggml_new_tensor_impl
+// flattens the view chain: view_src always holds the ultimate leaf, not an intermediate view.
+
+const struct ggml_tensor * ggml_get_weight_scale(const struct ggml_tensor * t) {
+    GGML_ASSERT(t != NULL);
+
+    // Follow view_src to the leaf (always one level because of chain flattening)
+    const struct ggml_tensor * leaf = (t->view_src != NULL) ? t->view_src : t;
+
+    if (!ggml_get_type_traits(leaf->type)->is_derived) {
+        return NULL;
+    }
+
+    // Scales invalidated on this tensor (e.g. after permutation)
+    if (t->flags & GGML_TENSOR_FLAG_SCALES_INVALID && ggml_nelements(leaf->src[0]) != 1) {
+        return NULL;
+    }
+
+    return leaf->src[0];  // weight correction scale (F32, per-tensor or per-row)
+}
+
+const struct ggml_tensor * ggml_get_act_scale(const struct ggml_tensor * t) {
+    GGML_ASSERT(t != NULL);
+
+    // Follow view_src to the leaf (always one level because of chain flattening)
+    const struct ggml_tensor * leaf = (t->view_src != NULL) ? t->view_src : t;
+
+    if (!ggml_get_type_traits(leaf->type)->is_derived) {
+        return NULL;
+    }
+
+    if (t->flags & GGML_TENSOR_FLAG_SCALES_INVALID && ggml_nelements(leaf->src[0]) != 1) {
+        return NULL;
+    }
+
+    return leaf->src[1];  // activation correction scale (F32, optional)
 }
 
 //
@@ -3806,6 +3897,12 @@ struct ggml_tensor * ggml_permute(
 
     result->op     = GGML_OP_PERMUTE;
     result->src[0] = a;
+
+    // Permutation reorders axes, making per-row (or per-column) scales invalid.
+    // Any consumer must check GGML_TENSOR_FLAG_SCALES_INVALID before using scales.
+    if (ggml_get_type_traits(a->type)->is_derived) {
+        result->flags |= GGML_TENSOR_FLAG_SCALES_INVALID;
+    }
 
     int32_t params[] = { axis0, axis1, axis2, axis3 };
     ggml_set_op_params(result, params, sizeof(params));
@@ -7655,7 +7752,8 @@ size_t ggml_quantize_chunk(
                int64_t   start,
                int64_t   nrows,
                int64_t   n_per_row,
-           const float * imatrix) {
+           const float * imatrix,
+           float * scales_out) {
     const int64_t n = (int64_t) nrows * n_per_row;
 
     if (ggml_quantize_requires_imatrix(type)) {
@@ -7680,7 +7778,7 @@ size_t ggml_quantize_chunk(
         case GGML_TYPE_Q5_1:    result = quantize_q5_1(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q8_0:    result = quantize_q8_0(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_MXFP4:   result = quantize_mxfp4(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
-        case GGML_TYPE_NVFP4:   result = quantize_nvfp4(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
+        case GGML_TYPE_NVFP4:   result = quantize_nvfp4(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix, scales_out); break;
         case GGML_TYPE_Q2_K:    result = quantize_q2_K(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q3_K:    result = quantize_q3_K(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;
         case GGML_TYPE_Q4_K:    result = quantize_q4_K(src + start, (char *) dst + start_row * row_size, nrows, n_per_row, imatrix); break;

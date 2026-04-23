@@ -72,7 +72,7 @@ llm_build_llama<embed>::llm_build_llama(const llama_model & model, const llm_gra
             cur = build_attn(inp_attn,
                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
-            if (model.layers[il].wo_s) {
+            if (model.layers[il].wo_s && ggml_get_weight_scale(model.layers[il].wo) == nullptr) {
                 cur = ggml_mul(ctx0, cur, model.layers[il].wo_s);
             }
             cb(cur, "attn_out", il);

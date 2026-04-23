@@ -1191,6 +1191,11 @@ static void ggml_compute_forward_mul_mat_one_chunk(
 
     const size_t src1_col_stride = src1_cont || src1->type != vec_dot_type ? row_size : nb11;
 
+    // NVFP4 weight correction scale; NULL for all other quant types
+    const struct ggml_tensor * w_scale_t    = ggml_get_weight_scale(src0);
+    const float              * w_scale_data = (w_scale_t != NULL) ? (const float *) w_scale_t->data : NULL;
+    const int64_t              n_w_scales   = (w_scale_data != NULL) ? (int64_t) w_scale_t->ne[0] : 0;
+
     // attempt to reduce false-sharing (does not seem to make a difference)
     // 16 * 2, accounting for mmla kernels
     float tmp[32];
@@ -1228,6 +1233,15 @@ static void ggml_compute_forward_mul_mat_one_chunk(
 
                 for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
                     vec_dot(ne00, &tmp[ir0 - iir0], (num_rows_per_vec_dot > 1 ? 16 : 0), src0_row + ir0 * nb01, (num_rows_per_vec_dot > 1 ? nb01 : 0), src1_col, (num_rows_per_vec_dot > 1 ? src1_col_stride : 0), num_rows_per_vec_dot);
+                }
+
+                // Apply NVFP4 weight correction scale to dot-product results (per-row or per-tensor)
+                if (w_scale_data != NULL && num_rows_per_vec_dot == 1) {
+                    const int64_t n_out = MIN(iir0 + blck_0, ir0_end) - iir0;
+                    for (int64_t k = 0; k < n_out; ++k) {
+                        const float s = (n_w_scales > 1) ? w_scale_data[iir0 + k] : w_scale_data[0];
+                        tmp[k] *= s;
+                    }
                 }
 
                 for (int cn = 0; cn < num_rows_per_vec_dot; ++cn) {
@@ -1455,7 +1469,8 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
     const struct mmid_row_mapping * matrix_rows,
     const size_t row_size,
     const bool src1_cont,
-    const void * wdata) {
+    const void * wdata,
+    const float w_scale) {
 
     GGML_TENSOR_BINARY_OP_LOCALS
 
@@ -1496,6 +1511,7 @@ static void ggml_compute_forward_mul_mat_id_one_chunk(
 
                 for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ++ir0) {
                     vec_dot(ne00, &tmp[ir0 - iir0], 0, src0_cur + ir0*nb01, 0, src1_col, 0, 1);
+                    tmp[ir0 - iir0] *= w_scale;
                 }
 
                 memcpy(&dst_col[iir0], tmp, (MIN(iir0 + blck_0, ir0_end) - iir0)*sizeof(float));
@@ -1531,6 +1547,9 @@ static void ggml_compute_forward_mul_mat_id(
 
     enum ggml_type    const vec_dot_type    = type_traits_cpu[type].vec_dot_type;
     ggml_from_float_t const from_float      = type_traits_cpu[vec_dot_type].from_float;
+    const struct ggml_tensor * w_scale_t    = ggml_get_weight_scale(src0);
+    const float              * w_scale_data = (w_scale_t != NULL) ? (const float *) w_scale_t->data : NULL;
+    const int64_t              n_w_scales   = (w_scale_t != NULL) ? ggml_nelements(w_scale_t) : 0;
 
     // we don't support permuted src0 or src1
     GGML_ASSERT(nb00 == ggml_type_size(type));
@@ -1632,6 +1651,9 @@ static void ggml_compute_forward_mul_mat_id(
             continue;
         }
 
+        GGML_ASSERT(w_scale_data == NULL || n_w_scales == 1 || n_w_scales == n_as);
+        const float w_scale = w_scale_data != NULL ? w_scale_data[n_w_scales == 1 ? 0 : cur_a] : 1.0f;
+
         const char * src0_cur = (const char *) src0->data + cur_a * nb02;
         const void * wdata = (src1->type == vec_dot_type) ? src1->data : params->wdata;
         const size_t row_size = ggml_row_size(vec_dot_type, ne10);
@@ -1675,7 +1697,7 @@ static void ggml_compute_forward_mul_mat_id(
             ggml_compute_forward_mul_mat_id_one_chunk(
                 dst, src0, src1, ids, cur_a,
                 ir0_start, ir0_end, ir1_start, ir1_end,
-                src0_cur, matrix_rows, row_size, src1_cont, wdata
+                src0_cur, matrix_rows, row_size, src1_cont, wdata, w_scale
             );
 
             if (nth >= nchunk0 * nchunk1) {

@@ -706,10 +706,12 @@ static ggml_type llama_tensor_get_type(quantize_state_impl & qs, const llama_mod
 // quantization implementation
 //
 
-static size_t llama_tensor_quantize_impl(enum ggml_type new_type, const float * f32_data, void * new_data, const int64_t chunk_size, int64_t nrows, int64_t n_per_row, const float * imatrix, std::vector<std::thread> & workers, const int nthread) {
-    if (nthread < 2) {
+static size_t llama_tensor_quantize_impl(enum ggml_type new_type, const float * f32_data, void * new_data, const int64_t chunk_size, int64_t nrows, int64_t n_per_row, const float * imatrix, std::vector<std::thread> & workers, const int nthread, float * scales_out = nullptr) {
+    // NVFP4 uses a per-tensor correction scale computed over all rows at once;
+    // multi-threaded chunking would produce per-chunk scales instead, so force single-threaded.
+    if (nthread < 2 || new_type == GGML_TYPE_NVFP4) {
         // single-thread
-        size_t new_size = ggml_quantize_chunk(new_type, f32_data, new_data, 0, nrows, n_per_row, imatrix);
+        size_t new_size = ggml_quantize_chunk(new_type, f32_data, new_data, 0, nrows, n_per_row, imatrix, scales_out);
         if (!ggml_validate_row_data(new_type, new_data, new_size)) {
             throw std::runtime_error("quantized data validation failed");
         }
@@ -721,7 +723,7 @@ static size_t llama_tensor_quantize_impl(enum ggml_type new_type, const float * 
     size_t new_size = 0;
     bool valid = true;
     auto compute = [&mutex, &counter, &new_size, &valid, new_type, f32_data, new_data, chunk_size,
-            nrows, n_per_row, imatrix]() {
+            nrows, n_per_row, imatrix, scales_out]() {
         const int64_t nrows_per_chunk = chunk_size / n_per_row;
         size_t local_size = 0;
         while (true) {
@@ -735,7 +737,8 @@ static size_t llama_tensor_quantize_impl(enum ggml_type new_type, const float * 
             }
             lock.unlock();
             const int64_t this_nrow = std::min(nrows - first_row, nrows_per_chunk);
-            size_t this_size = ggml_quantize_chunk(new_type, f32_data, new_data, first_row * n_per_row, this_nrow, n_per_row, imatrix);
+            float * scales_out_chunk = (scales_out != nullptr) ? scales_out + first_row : nullptr;
+            size_t this_size = ggml_quantize_chunk(new_type, f32_data, new_data, first_row * n_per_row, this_nrow, n_per_row, imatrix, scales_out_chunk);
             local_size += this_size;
 
             // validate the quantized data
@@ -1144,6 +1147,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
 
         void * new_data;
         size_t new_size;
+    std::vector<float> scales_data;  // for storing NVFP4 weight correction scales
 
         if (params->dry_run) {
             // the --dry-run option calculates the final quantization size without quantizing
@@ -1234,12 +1238,18 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
 
                 // quantize each expert separately since they have different importance matrices
                 new_size = 0;
+                
+                if (new_type == GGML_TYPE_NVFP4) {
+                    scales_data.resize(tensor->ne[2]); // one per-tensor correction scale per expert
+                }
+                
                 for (int64_t i03 = 0; i03 < tensor->ne[2]; ++i03) {
                     const float * f32_data_03 = f32_data + i03 * nelements_matrix;
                     void * new_data_03 = (char *)new_data + ggml_row_size(new_type, n_per_row) * i03 * nrows;
                     const float * imatrix_03 = imatrix ? imatrix + i03 * n_per_row : nullptr;
+                    float * scales_out_03 = (!scales_data.empty()) ? scales_data.data() + i03 : nullptr;
 
-                    new_size += llama_tensor_quantize_impl(new_type, f32_data_03, new_data_03, chunk_size, nrows, n_per_row, imatrix_03, workers, nthread_use);
+                    new_size += llama_tensor_quantize_impl(new_type, f32_data_03, new_data_03, chunk_size, nrows, n_per_row, imatrix_03, workers, nthread_use, scales_out_03);
                 }
                 LLAMA_LOG_INFO("size = %8.2f MiB -> %8.2f MiB\n", tensor_size/1024.0/1024.0, new_size/1024.0/1024.0);
             }
@@ -1254,6 +1264,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
             // write tensor data + padding
             fout.write((const char *) new_data, new_size);
             zeros(fout, GGML_PAD(new_size, align) - new_size);
+            
         } // no --dry-run
     } // main loop
 

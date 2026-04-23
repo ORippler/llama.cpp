@@ -549,6 +549,13 @@ void dequantize_row_nvfp4(const block_nvfp4 * GGML_RESTRICT x, float * GGML_REST
     }
 }
 
+void dequantize_row_nvfp4_scaled(const block_nvfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k, float scale) {
+    dequantize_row_nvfp4(x, y, k);
+    for (int64_t i = 0; i < k; ++i) {
+        y[i] *= scale;
+    }
+}
+
 //
 // 2-6 bit quantization in super-blocks
 //
@@ -2229,9 +2236,48 @@ size_t quantize_mxfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
     return nrow * ggml_row_size(GGML_TYPE_MXFP4, n_per_row);
 }
 
-size_t quantize_nvfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+// Compute the correction scale for NVFP4 quantization
+// Formula: scale = amax(src) / (E4M3_MAX * E2M1_MAX) ≈ amax / 105.0
+static float compute_nvfp4_correction_scale(const float * GGML_RESTRICT src, int64_t n) {
+    float amax = 0.0f;
+    for (int64_t i = 0; i < n; i++) {
+        const float v = fabsf(src[i]);
+        if (amax < v) {
+            amax = v;
+        }
+    }
+    // Correction scale: amax divided by the product of quantization ranges
+    // E4M3 max ≈ 105.0, accounting for E2M1 and E4M3 combination
+    const float correction_scale = amax > 0.0f ? amax / 105.0f : 0.0f;
+    return correction_scale;
+}
+
+size_t quantize_nvfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights, float * GGML_RESTRICT scales_out) {
     GGML_UNUSED(quant_weights);
-    quantize_row_nvfp4_ref(src, dst, (int64_t)nrow*n_per_row);
+
+    if (scales_out == NULL){
+        GGML_ABORT("scales_out cannot be NULL when quantizing to NVFP4, as a correction scale is required to maintain accuracy.");
+    }
+
+    const int64_t n_total = nrow * n_per_row;
+
+    // Compute a single per-tensor correction scale across all rows
+    const float correction_scale = compute_nvfp4_correction_scale(src, n_total);
+
+    scales_out[0] = correction_scale;
+
+    // Divide src by the correction scale before quantizing so the NVFP4 block
+    // quantizer sees values in the normalized range and captures them faithfully.
+// At dequant time, dequantize_row_nvfp4_scaled() will multiply back by the scale.
+    float * scaled = (float *) malloc(n_total * sizeof(float));
+    GGML_ASSERT(scaled != NULL);
+    const float inv_scale = 1.0f / correction_scale;
+    for (int64_t i = 0; i < n_total; i++) {
+        scaled[i] = src[i] * inv_scale;
+    }
+    quantize_row_nvfp4_ref(scaled, dst, n_total);
+    free(scaled);
+
     return nrow * ggml_row_size(GGML_TYPE_NVFP4, n_per_row);
 }
 

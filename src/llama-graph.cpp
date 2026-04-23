@@ -966,6 +966,10 @@ ggml_tensor * llm_graph_context::build_cvec(
     return cvec->apply_to(ctx0, cur, il);
 }
 
+static bool ggml_tensor_has_bound_weight_scale(const ggml_tensor * tensor) {
+    return tensor != nullptr && ggml_get_weight_scale(tensor) != nullptr;
+}
+
 ggml_tensor * llm_graph_context::build_lora_mm(
           ggml_tensor * w,
           ggml_tensor * cur,
@@ -990,7 +994,7 @@ ggml_tensor * llm_graph_context::build_lora_mm(
         res = ggml_add(ctx0, res, ab_cur);
     }
 
-    if (w_s) {
+    if (w_s && !ggml_tensor_has_bound_weight_scale(w)) {
         res = ggml_mul(ctx0, res, w_s);
     }
 
@@ -1161,7 +1165,7 @@ ggml_tensor * llm_graph_context::build_ffn(
         cb(tmp, "ffn_up_b", il);
     }
 
-    if (up_s) {
+    if (up_s && !ggml_tensor_has_bound_weight_scale(up)) {
         tmp = ggml_mul(ctx0, tmp, up_s);
         cb(tmp, "ffn_up_s", il);
     }
@@ -1185,7 +1189,7 @@ ggml_tensor * llm_graph_context::build_ffn(
             cb(cur, "ffn_gate_b", il);
         }
 
-        if (gate_s) {
+        if (gate_s && !ggml_tensor_has_bound_weight_scale(gate)) {
             cur = ggml_mul(ctx0, cur, gate_s);
             cb(cur, "ffn_gate_s", il);
         }
@@ -1294,7 +1298,7 @@ ggml_tensor * llm_graph_context::build_ffn(
         cur = ggml_add(ctx0, cur, down_b);
     }
 
-    if (down_s) {
+    if (down_s && !ggml_tensor_has_bound_weight_scale(down)) {
         cur = ggml_mul(ctx0, cur, down_s);
         cb(cur, "ffn_down_s", il);
     }
@@ -1520,7 +1524,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         // apply per-expert scale2 to merged gate_up (use up_exps_s since gate and up are fused)
-        if (up_exps_s) {
+        if (up_exps_s && !ggml_tensor_has_bound_weight_scale(gate_up_exps)) {
             ggml_tensor * s = ggml_reshape_3d(ctx0, up_exps_s, 1, n_expert, 1);
             s = ggml_repeat_4d(ctx0, s, 1, n_expert, n_tokens, 1);
             s = ggml_get_rows(ctx0, s, selected_experts); // [1, n_expert_used, n_tokens]
@@ -1544,7 +1548,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         // apply per-expert scale2 to up
-        if (up_exps_s) {
+        if (up_exps_s && !ggml_tensor_has_bound_weight_scale(up_exps)) {
             ggml_tensor * s = ggml_reshape_3d(ctx0, up_exps_s, 1, n_expert, 1);
             s = ggml_repeat_4d(ctx0, s, 1, n_expert, n_tokens, 1);
             s = ggml_get_rows(ctx0, s, selected_experts); // [1, n_expert_used, n_tokens]
@@ -1565,7 +1569,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         }
 
         // apply per-expert scale2 to gate
-        if (gate_exps_s) {
+        if (gate_exps_s && !ggml_tensor_has_bound_weight_scale(gate_exps)) {
             ggml_tensor * s = ggml_reshape_3d(ctx0, gate_exps_s, 1, n_expert, 1);
             s = ggml_repeat_4d(ctx0, s, 1, n_expert, n_tokens, 1);
             s = ggml_get_rows(ctx0, s, selected_experts); // [1, n_expert_used, n_tokens]
@@ -1652,7 +1656,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     }
 
     // apply per-expert scale2 to down
-    if (down_exps_s) {
+    if (down_exps_s && !ggml_tensor_has_bound_weight_scale(down_exps)) {
         ggml_tensor * s = ggml_reshape_3d(ctx0, down_exps_s, 1, n_expert, 1);
         s = ggml_repeat_4d(ctx0, s, 1, n_expert, n_tokens, 1);
         s = ggml_get_rows(ctx0, s, selected_experts); // [1, n_expert_used, n_tokens]
@@ -2231,7 +2235,7 @@ ggml_tensor * llm_graph_context::build_attn(
             // GLM4, GLM4_MOE, and JAIS2 seem to have numerical issues with half-precision accumulators
             cur = build_lora_mm(wo, cur);
             ggml_mul_mat_set_prec(cur, GGML_PREC_F32);
-            if (wo_s) {
+            if (wo_s && !ggml_tensor_has_bound_weight_scale(wo)) {
                 cur = ggml_mul(ctx0, cur, wo_s);
             }
         } else {
@@ -2318,7 +2322,7 @@ ggml_tensor * llm_graph_context::build_attn(
             // GLM4 and GLM4_MOE seem to have numerical issues with half-precision accumulators
             cur = build_lora_mm(wo, cur);
             ggml_mul_mat_set_prec(cur, GGML_PREC_F32);
-            if (wo_s) {
+            if (wo_s && !ggml_tensor_has_bound_weight_scale(wo)) {
                 cur = ggml_mul(ctx0, cur, wo_s);
             }
         } else {

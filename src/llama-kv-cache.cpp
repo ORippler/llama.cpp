@@ -53,7 +53,9 @@ static void ggml_gen_hadamard(ggml_tensor * tensor) {
     }
 
     if (tensor->type != GGML_TYPE_F32) {
-        ggml_quantize_chunk(tensor->type, data, tensor->data, 0, 1, n*n, nullptr);
+        float nvfp4_scale = 1.0f;
+        float * scales_out = (tensor->type == GGML_TYPE_NVFP4) ? &nvfp4_scale : nullptr;
+        ggml_quantize_chunk(tensor->type, data, tensor->data, 0, 1, n*n, nullptr, scales_out);
     }
 }
 

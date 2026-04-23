@@ -91,6 +91,9 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
 
     if (tensor->type == GGML_TYPE_F32 || tensor->type == GGML_TYPE_I32) {
         ggml_backend_tensor_set(tensor, data.data(), 0, nels * sizeof(float));
+    } else if (tensor->type == GGML_TYPE_NVFP4) {
+        // NVFP4 requires a per-tensor correction scale wired as src[0]; handled in initialize_tensors.
+        return;
     } else if (ggml_is_quantized(tensor->type) || tensor->type == GGML_TYPE_F16 || tensor->type == GGML_TYPE_BF16) {
         GGML_ASSERT(nels % ggml_blck_size(tensor->type) == 0);
 
@@ -113,7 +116,7 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
 
             auto quantize_thread = [&](size_t start, size_t end) {
                 ggml_quantize_chunk(tensor->type, data.data(), dataq.data(),
-                    start * blck_size, end - start, blck_size, im);
+                    start * blck_size, end - start, blck_size, im, nullptr);
             };
 
             const size_t min_blocks_per_thread = 1;
@@ -1174,6 +1177,48 @@ struct test_case {
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
             init_tensor_uniform(t);
         }
+        // For NVFP4 tensors: quantize in one shot and fill the companion scale tensor that was
+        // pre-allocated by add_aux_tensors(). src[0] must already point to a valid F32 tensor.
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->type != GGML_TYPE_NVFP4 || t->src[0] == nullptr) {
+                continue;
+            }
+            const int64_t nels    = ggml_nelements(t);
+            const int64_t ne0     = t->ne[0];
+            const int64_t nrows   = nels / ne0;
+
+            // Quantize the whole tensor in one shot to get the correct per-tensor scale.
+            std::vector<float>   f32_src(nels);
+            std::vector<uint8_t> q_dst(ggml_nbytes(t));
+            {
+                std::default_random_engine rng(42);
+                std::uniform_real_distribution<float> dis(-1.0f, 1.0f);
+                for (auto & v : f32_src) { v = dis(rng); }
+            }
+            float scale_val = 1.0f;
+            ggml_quantize_chunk(GGML_TYPE_NVFP4, f32_src.data(), q_dst.data(),
+                                0, nrows, ne0, nullptr, &scale_val);
+            ggml_backend_tensor_set(t, q_dst.data(), 0, q_dst.size());
+
+            // Fill the pre-allocated scale tensor with the computed scale.
+            ggml_backend_tensor_set(t->src[0], &scale_val, 0, sizeof(float));
+        }
+    }
+
+    // Called after build_graph and before ggml_backend_alloc_ctx_tensors so that auxiliary
+    // tensors (e.g. NVFP4 correction-scale tensors) are included in the allocation.
+    virtual void add_aux_tensors(ggml_context * ctx) {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->type != GGML_TYPE_NVFP4 || t->src[0] != nullptr) {
+                continue;
+            }
+            GGML_ASSERT(t->src[0] == nullptr);
+            GGML_ASSERT(t->src[1] == nullptr);
+            // Create a companion F32 scalar tensor to hold the per-tensor correction scale.
+            ggml_tensor * scale_t = ::ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+            ggml_set_name(scale_t, (std::string(ggml_get_name(t)) + "_w_scale").c_str());
+            t->src[0] = scale_t;
+        }
     }
 
     virtual size_t op_size(ggml_tensor * t) {
@@ -1332,6 +1377,9 @@ struct test_case {
         // post-graph sentinel
         add_sentinel(ctx);
 
+        // add auxiliary tensors (e.g. NVFP4 correction scales) before backend allocation
+        add_aux_tensors(ctx);
+
         // allocate
         ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend1);
 
@@ -1481,6 +1529,9 @@ struct test_case {
 
             return true;
         }
+
+        // add auxiliary tensors (e.g. NVFP4 correction scales) before backend allocation
+        add_aux_tensors(ctx.get());
 
         // allocate
         ggml_backend_buffer_ptr buf(ggml_backend_alloc_ctx_tensors(ctx.get(), backend)); // smart ptr
@@ -1728,6 +1779,9 @@ struct test_case {
         if (!supported) {
             return true;
         }
+
+        // add auxiliary tensors (e.g. NVFP4 correction scales) before backend allocation
+        add_aux_tensors(ctx.get());
 
         // allocate
         ggml_backend_buffer_ptr buf(ggml_backend_alloc_ctx_tensors(ctx.get(), backend)); // smart ptr
@@ -3862,6 +3916,8 @@ struct test_mul_mat : public test_case {
 static void init_mul_mat_id_tensors(ggml_context * ctx, int n_mats) {
     std::random_device rd;
     std::default_random_engine rng(rd());
+    std::default_random_engine q_rng(42);
+    std::uniform_real_distribution<float> q_dis(-1.0f, 1.0f);
     for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
         if (t->type == GGML_TYPE_I32) {
             if (ggml_is_view_op(t->op)) { continue; }
@@ -3874,9 +3930,47 @@ static void init_mul_mat_id_tensors(ggml_context * ctx, int n_mats) {
                 std::shuffle(data.begin(), data.end(), rng);
                 ggml_backend_tensor_set(t, data.data(), r * t->nb[1], t->ne[0] * sizeof(int32_t));
             }
+        } else if (t->type == GGML_TYPE_NVFP4 && t->src[0] != nullptr) {
+            const int64_t ne0      = t->ne[0];
+            const int64_t nrows    = ggml_nelements(t) / (ne0 * t->ne[2]);
+            const int64_t n_expert = t->ne[2];
+            const size_t  q_nbytes = ggml_row_size(t->type, ne0) * nrows;
+
+            std::vector<float> scales(n_expert, 1.0f);
+            std::vector<float> f32_src(ne0 * nrows);
+            std::vector<uint8_t> q_dst(q_nbytes);
+
+            for (int64_t expert = 0; expert < n_expert; ++expert) {
+                for (float & value : f32_src) {
+                    value = q_dis(q_rng);
+                }
+
+                float scale_val = 1.0f;
+                ggml_quantize_chunk(GGML_TYPE_NVFP4, f32_src.data(), q_dst.data(),
+                                    0, nrows, ne0, nullptr, &scale_val);
+                ggml_backend_tensor_set(t, q_dst.data(), expert * t->nb[2], q_dst.size());
+                scales[expert] = scale_val;
+            }
+
+            ggml_backend_tensor_set(t->src[0], scales.data(), 0, scales.size() * sizeof(float));
         } else {
             init_tensor_uniform(t);
         }
+    }
+}
+
+static void add_mul_mat_id_aux_tensors(ggml_context * ctx) {
+    for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+        if (t->type != GGML_TYPE_NVFP4 || t->src[0] != nullptr) {
+            continue;
+        }
+
+        GGML_ASSERT(t->src[1] == nullptr);
+        GGML_ASSERT(t->ne[2] > 0);
+
+        ggml_tensor * scale_t = ::ggml_new_tensor_1d(ctx, GGML_TYPE_F32, t->ne[2]);
+        ggml_set_name(scale_t, (std::string(ggml_get_name(t)) + "_w_scale").c_str());
+        t->src[0] = scale_t;
     }
 }
 
@@ -3943,6 +4037,10 @@ struct test_mul_mat_id : public test_case {
 
     void initialize_tensors(ggml_context * ctx) override {
         init_mul_mat_id_tensors(ctx, n_mats);
+    }
+
+    void add_aux_tensors(ggml_context * ctx) override {
+        add_mul_mat_id_aux_tensors(ctx);
     }
 };
 
@@ -4017,6 +4115,10 @@ struct test_mul_mat_id_fusion : public test_case {
 
     void initialize_tensors(ggml_context * ctx) override {
         init_mul_mat_id_tensors(ctx, n_mats);
+    }
+
+    void add_aux_tensors(ggml_context * ctx) override {
+        add_mul_mat_id_aux_tensors(ctx);
     }
 
     bool run_whole_graph() override { return true; }
@@ -8153,7 +8255,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
 
     for (int bs : {1, 4, 512}) {
-        for (ggml_type type_a : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q4_0, GGML_TYPE_Q4_K}) {
+        for (ggml_type type_a : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_NVFP4}) {
             for (ggml_type type_b : {GGML_TYPE_F32}) {
                 // test with mul after (ffn_moe_weighted)
                 test_cases.emplace_back(new test_mul_mat_id_fusion(type_a, type_b, 128, 8, false, 768, bs, 2048, 1, true));

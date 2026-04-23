@@ -4690,6 +4690,11 @@ static void ggml_compute_forward_get_rows_q(
     const int ir0 = dr*ith;
     const int ir1 = MIN(ir0 + dr, nr);
 
+    // NVFP4 weight correction scale (NULL for all other quant types)
+    const struct ggml_tensor * w_scale_t  = ggml_get_weight_scale(src0);
+    const float             * w_scale_data = (w_scale_t != NULL) ? (const float *) w_scale_t->data : NULL;
+    const int64_t             n_w_scales   = (w_scale_data != NULL) ? w_scale_t->ne[0] : 0;
+
     for (int64_t i = ir0; i < ir1; ++i) {
         const int64_t i12 = i/(ne11*ne10);
         const int64_t i11 = (i - i12*ne11*ne10)/ne10;
@@ -4698,9 +4703,18 @@ static void ggml_compute_forward_get_rows_q(
 
         GGML_ASSERT(i01 >= 0 && i01 < ne01);
 
+        float * row_out = (float *) ((char *) dst->data + i10*nb1 + i11*nb2 + i12*nb3);
+
         dequantize_row_q(
                 (const void *) ((char *) src0->data + i01*nb01 + i11*nb02 + i12*nb03),
-                     (float *) ((char *)  dst->data + i10*nb1  + i11*nb2  + i12*nb3), nc);
+                row_out, nc);
+
+        if (w_scale_data != NULL) {
+            const float s = (n_w_scales > 1) ? w_scale_data[i01] : w_scale_data[0];
+            for (int64_t k = 0; k < nc; ++k) {
+                row_out[k] *= s;
+            }
+        }
     }
 }
 

@@ -635,11 +635,12 @@ extern "C" {
 
     // this tensor...
     enum ggml_tensor_flag {
-        GGML_TENSOR_FLAG_INPUT   =  1, // ...is an input for the GGML compute graph
-        GGML_TENSOR_FLAG_OUTPUT  =  2, // ...is an output for the GGML compute graph
-        GGML_TENSOR_FLAG_PARAM   =  4, // ...contains trainable parameters
-        GGML_TENSOR_FLAG_LOSS    =  8, // ...defines loss for numerical optimization (multiple loss tensors add up)
-        GGML_TENSOR_FLAG_COMPUTE = 16, // ...must be computed
+        GGML_TENSOR_FLAG_INPUT          =  1, // ...is an input for the GGML compute graph
+        GGML_TENSOR_FLAG_OUTPUT         =  2, // ...is an output for the GGML compute graph
+        GGML_TENSOR_FLAG_PARAM          =  4, // ...contains trainable parameters
+        GGML_TENSOR_FLAG_LOSS           =  8, // ...defines loss for numerical optimization (multiple loss tensors add up)
+        GGML_TENSOR_FLAG_COMPUTE        = 16, // ...must be computed
+        GGML_TENSOR_FLAG_SCALES_INVALID = 32, // derived tensor with per-row scales are no longer valid after permutation
     };
 
     enum ggml_tri_type {
@@ -2757,7 +2758,8 @@ extern "C" {
                    int64_t   start,
                    int64_t   nrows,
                    int64_t   n_per_row,
-               const float * imatrix);
+               const float * imatrix,
+               float * scales_out);
 
 #ifdef __cplusplus
     // restrict not standard in C++
@@ -2786,11 +2788,30 @@ extern "C" {
         int64_t                  blck_size_interleave; // interleave elements in blocks
         size_t                   type_size;
         bool                     is_quantized;
+        bool                     is_derived;           // type supports per-tensor/per-row scales in src[0] and src[1]
         ggml_to_float_t          to_float;
         ggml_from_float_t        from_float_ref;
     };
 
     GGML_API const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type);
+
+        // Tensor-aware dequantization helper.
+        // Unlike ggml_type_traits::to_float, this has access to tensor metadata and applies
+        // derived-tensor correction scales stored in src[0] when present.
+        GGML_API void ggml_dequantize_tensor_to_f32(
+                        const struct ggml_tensor * tensor,
+                        const void               * data,
+                                  float              * out,
+                                  int64_t              n);
+
+    // Derived-tensor scale accessors
+    // For derived types (e.g. NVFP4), scales are stored in the leaf tensor's src slots:
+    //   src[0] = weight correction scale  (F32, shape [1] per-tensor or [n_rows] per-row)
+    //   src[1] = activation scale         (F32, shape [1] per-tensor or [n_rows] per-row)
+    // Views (view_src != NULL) automatically inherit scales through the flattened view_src.
+    // Returns NULL if no scale exists or if GGML_TENSOR_FLAG_SCALES_INVALID and ggml_nelements(leaf->src[0]) != 1.
+    GGML_API const struct ggml_tensor * ggml_get_weight_scale(const struct ggml_tensor * tensor);
+    GGML_API const struct ggml_tensor * ggml_get_act_scale   (const struct ggml_tensor * tensor);
 
     // ggml threadpool
     // TODO: currently, only a few functions are in the base ggml API, while the rest are in the CPU backend

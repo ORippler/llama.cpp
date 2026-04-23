@@ -12320,7 +12320,9 @@ static void ggml_vk_print_tensor_area(const ggml_tensor * tensor, int i0, int i1
 }
 
 static void ggml_vk_quantize_data(const float * from, void * to, size_t ne, ggml_type quant) {
-    ggml_quantize_chunk(quant, from, to, 0, 1, ne, nullptr);
+    float nvfp4_scale = 1.0f;
+    float * scales_out = (quant == GGML_TYPE_NVFP4) ? &nvfp4_scale : nullptr;
+    ggml_quantize_chunk(quant, from, to, 0, 1, ne, nullptr, scales_out);
 }
 
 static void ggml_vk_dequantize_data(const void * from, float * to, size_t ne, ggml_type quant) {
