@@ -108,10 +108,7 @@ ggml_tensor * llm_build_nemotron_h::build_ffn_layer(ggml_tensor * cur, const lla
                     hparams.expert_weights_scale,
                     LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID,
                     il,
-                    router_logits, nullptr,
-                    model.layers[il].ffn_up_exps_s,
-                    nullptr, // no gate
-                    model.layers[il].ffn_down_exps_s);
+                    router_logits, nullptr);
         cb(moe_out, "ffn_moe_out", il);
 
         if (model.layers[il].ffn_latent_up) {

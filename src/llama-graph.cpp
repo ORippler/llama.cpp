@@ -969,9 +969,7 @@ ggml_tensor * llm_graph_context::build_cvec(
 ggml_tensor * llm_graph_context::build_lora_mm(
           ggml_tensor * w,
         ggml_tensor * cur,
-        ggml_tensor * w_s) const {
-    GGML_UNUSED(w_s);
-
+        ggml_tensor * /* w_s */) const {
     ggml_tensor * res = ggml_mul_mat(ctx0, w, cur);
 
     for (const auto & lora : *loras) {
@@ -1140,21 +1138,17 @@ ggml_tensor * llm_graph_context::build_ffn(
          ggml_tensor * cur,
          ggml_tensor * up,
          ggml_tensor * up_b,
-         ggml_tensor * up_s,
+         ggml_tensor * /* up_s */,
          ggml_tensor * gate,
          ggml_tensor * gate_b,
-         ggml_tensor * gate_s,
+         ggml_tensor * /* gate_s */,
          ggml_tensor * down,
          ggml_tensor * down_b,
-         ggml_tensor * down_s,
+         ggml_tensor * /* down_s */,
          ggml_tensor * act_scales,
      llm_ffn_op_type   type_op,
    llm_ffn_gate_type   type_gate,
                  int   il) const {
-        GGML_UNUSED(up_s);
-        GGML_UNUSED(gate_s);
-        GGML_UNUSED(down_s);
-
     ggml_tensor * tmp = up ? build_lora_mm(up, cur) : cur;
     cb(tmp, "ffn_up", il);
 
@@ -1304,10 +1298,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          llama_expert_gating_func_type gating_op,
                  int   il,
          ggml_tensor * probs_in,
-         ggml_tensor * gate_up_exps,
-         ggml_tensor * up_exps_s,
-         ggml_tensor * gate_exps_s,
-         ggml_tensor * down_exps_s) const {
+         ggml_tensor * gate_up_exps) const {
     return build_moe_ffn(
         cur,
         gate_inp,  /* gate_inp_b  */ nullptr,
@@ -1324,10 +1315,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         il,
         probs_in,
         gate_up_exps,
-        /* gate_up_exps_b */ nullptr,
-        up_exps_s,
-        gate_exps_s,
-        down_exps_s
+        /* gate_up_exps_b */ nullptr
     );
 }
 
@@ -1347,18 +1335,11 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
      llm_ffn_op_type   type_op,
                 bool   norm_w,
                float   w_scale,
-        llama_expert_gating_func_type gating_op,
+         llama_expert_gating_func_type gating_op,
                  int   il,
          ggml_tensor * probs_in,
          ggml_tensor * gate_up_exps,
-         ggml_tensor * gate_up_exps_b,
-         ggml_tensor * up_exps_s,
-         ggml_tensor * gate_exps_s,
-         ggml_tensor * down_exps_s) const {
-        GGML_UNUSED(up_exps_s);
-        GGML_UNUSED(gate_exps_s);
-        GGML_UNUSED(down_exps_s);
-
+         ggml_tensor * gate_up_exps_b) const {
     const int64_t n_embd   = cur->ne[0];
     const int64_t n_tokens = cur->ne[1];
     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
@@ -2046,7 +2027,7 @@ ggml_tensor * llm_graph_context::build_attn(
         llm_graph_input_attn_no_cache * inp,
         ggml_tensor * wo,
         ggml_tensor * wo_b,
-        ggml_tensor * wo_s,
+        ggml_tensor * /* wo_s */,
         ggml_tensor * q_cur,
         ggml_tensor * k_cur,
         ggml_tensor * v_cur,
@@ -2056,7 +2037,6 @@ ggml_tensor * llm_graph_context::build_attn(
             float     kq_scale,
             int       il) const {
     GGML_UNUSED(n_tokens);
-    GGML_UNUSED(wo_s);
 
     // these nodes are added to the graph together so that they are not reordered
     // by doing so, the number of splits in the graph is reduced
@@ -2132,7 +2112,7 @@ ggml_tensor * llm_graph_context::build_attn(
         llm_graph_input_attn_kv * inp,
         ggml_tensor * wo,
         ggml_tensor * wo_b,
-        ggml_tensor * wo_s,
+        ggml_tensor * /* wo_s */,
         ggml_tensor * q_cur,
         ggml_tensor * k_cur,
         ggml_tensor * v_cur,
@@ -2142,7 +2122,6 @@ ggml_tensor * llm_graph_context::build_attn(
             float     kq_scale,
             int       il) const {
     GGML_ASSERT(v_mla == nullptr);
-    GGML_UNUSED(wo_s);
 
     if (inp->self_k_rot) {
         q_cur = ggml_mul_mat_aux(ctx0, q_cur, inp->self_k_rot);
@@ -2234,7 +2213,7 @@ ggml_tensor * llm_graph_context::build_attn(
         llm_graph_input_attn_k * inp,
         ggml_tensor * wo,
         ggml_tensor * wo_b,
-        ggml_tensor * wo_s,
+        ggml_tensor * /* wo_s */,
         ggml_tensor * q_cur,
         ggml_tensor * k_cur,
         ggml_tensor * v_cur,
@@ -2243,8 +2222,6 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * v_mla,
             float     kq_scale,
             int       il) const {
-    GGML_UNUSED(wo_s);
-
     // these nodes are added to the graph together so that they are not reordered
     // by doing so, the number of splits in the graph is reduced
     // expand k later to enable rope fusion which directly writes into k-v cache
@@ -2291,7 +2268,7 @@ ggml_tensor * llm_graph_context::build_attn(
         llm_graph_input_attn_kv_iswa * inp,
         ggml_tensor * wo,
         ggml_tensor * wo_b,
-        ggml_tensor * wo_s,
+        ggml_tensor * /* wo_s */,
         ggml_tensor * q_cur,
         ggml_tensor * k_cur,
         ggml_tensor * v_cur,
@@ -2300,8 +2277,6 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * v_mla,
             float     kq_scale,
             int       il) const {
-    GGML_UNUSED(wo_s);
-
     const bool is_swa = hparams.is_swa(il);
 
     auto * k_rot = is_swa ? inp->self_k_rot_swa : inp->self_k_rot;
@@ -2393,7 +2368,7 @@ ggml_tensor * llm_graph_context::build_attn(
         llm_graph_input_attn_cross * inp,
         ggml_tensor * wo,
         ggml_tensor * wo_b,
-        ggml_tensor * wo_s,
+        ggml_tensor * /* wo_s */,
         ggml_tensor * q_cur,
         ggml_tensor * k_cur,
         ggml_tensor * v_cur,
@@ -2402,8 +2377,6 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * v_mla,
             float     kq_scale,
             int       il) const {
-    GGML_UNUSED(wo_s);
-
     // these nodes are added to the graph together so that they are not reordered
     // by doing so, the number of splits in the graph is reduced
     ggml_build_forward_expand(gf, q_cur);
