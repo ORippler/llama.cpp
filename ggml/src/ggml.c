@@ -931,57 +931,6 @@ const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type) {
     return &type_traits[type];
 }
 
-void ggml_dequantize_tensor_to_f32(
-        const struct ggml_tensor * tensor,
-        const void               * data,
-              float              * out,
-              int64_t              n) {
-    GGML_ASSERT(tensor != NULL);
-    GGML_ASSERT(data != NULL);
-    GGML_ASSERT(out != NULL);
-    GGML_ASSERT(n >= 0);
-
-    const struct ggml_type_traits * tt = ggml_get_type_traits(tensor->type);
-    GGML_ASSERT(tt->to_float != NULL);
-
-    tt->to_float(data, out, n);
-
-    const struct ggml_tensor * w_scale_t = ggml_get_weight_scale(tensor);
-    if (w_scale_t == NULL) {
-        return;
-    }
-
-    const float * w_scale = (const float *) w_scale_t->data;
-    GGML_ASSERT(w_scale != NULL);
-
-    if (ggml_nelements(w_scale_t) == 1) {
-        const float s = w_scale[0];
-        for (int64_t i = 0; i < n; ++i) {
-            out[i] *= s;
-        }
-        return;
-    }
-
-    // Row-wise scales are indexed by logical rows of the tensor. For views, view_offs is
-    // already flattened against the leaf, so derive the starting row from the leaf row stride.
-    const struct ggml_tensor * leaf = tensor->view_src != NULL ? tensor->view_src : tensor;
-    GGML_ASSERT(leaf->nb[1] > 0);
-
-    const int64_t row_size   = tensor->ne[0];
-    const int64_t n_rows     = row_size > 0 ? (n / row_size) : 0;
-    const int64_t row_offset = tensor->view_src != NULL ? (int64_t) (tensor->view_offs / leaf->nb[1]) : 0;
-
-    GGML_ASSERT(row_size > 0);
-    GGML_ASSERT(n_rows * row_size == n);
-
-    for (int64_t row = 0; row < n_rows; ++row) {
-        const float s = w_scale[row_offset + row];
-        for (int64_t col = 0; col < row_size; ++col) {
-            out[row*row_size + col] *= s;
-        }
-    }
-}
-
 // For derived types (e.g. NVFP4), the leaf tensor stores scales in src[0]/src[1].
 // Views (view_src != NULL) automatically point to the same leaf because ggml_new_tensor_impl
 // flattens the view chain: view_src always holds the ultimate leaf, not an intermediate view.

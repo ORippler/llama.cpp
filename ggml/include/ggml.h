@@ -2795,15 +2795,6 @@ extern "C" {
 
     GGML_API const struct ggml_type_traits * ggml_get_type_traits(enum ggml_type type);
 
-        // Tensor-aware dequantization helper.
-        // Unlike ggml_type_traits::to_float, this has access to tensor metadata and applies
-        // derived-tensor correction scales stored in src[0] when present.
-        GGML_API void ggml_dequantize_tensor_to_f32(
-                        const struct ggml_tensor * tensor,
-                        const void               * data,
-                                  float              * out,
-                                  int64_t              n);
-
     // Derived-tensor scale accessors
     // For derived types (e.g. NVFP4), scales are stored in the leaf tensor's src slots:
     //   src[0] = weight correction scale  (F32, shape [1] per-tensor or [n_rows] per-row)
