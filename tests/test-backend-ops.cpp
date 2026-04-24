@@ -3894,9 +3894,12 @@ struct test_mul_mat : public test_case {
             ggml_set_name(b, "b");
         }
 
+        add_aux_tensors(ctx);
+
         ggml_tensor * out = ggml_mul_mat(ctx, a, b);
         ggml_set_name(out, "out");
         for (uint32_t i = 1; i < o; ++i) {
+            add_aux_tensors(ctx);
             ggml_tensor * out2 = ggml_mul_mat(ctx, a, b);
             ggml_set_name(out2, "out2");
             out = ggml_add(ctx, out, out2);
@@ -3989,6 +3992,11 @@ struct test_mul_mat_id : public test_case {
         return VARS_TO_STR8(type_a, type_b, n_mats, n_used, b, m, n, k);
     }
 
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return ggml_op_name(GGML_OP_MUL_MAT_ID);
+    }
+
     double max_nmse_err() override {
         return 5e-4;
     }
@@ -4028,6 +4036,8 @@ struct test_mul_mat_id : public test_case {
 
         ggml_tensor * b = ggml_new_tensor_3d(ctx, type_b, k, this->b ? 1 : n_used, n);
         ggml_set_name(b, "b");
+
+        add_aux_tensors(ctx);
 
         ggml_tensor * out = ggml_mul_mat_id(ctx, as, b, ids);
         ggml_set_name(out, "out");
@@ -4093,11 +4103,14 @@ struct test_mul_mat_id_fusion : public test_case {
         ggml_tensor * b = ggml_new_tensor_3d(ctx, type_b, k, this->b ? 1 : n_used, n);
         ggml_set_name(b, "b");
 
+        add_aux_tensors(ctx);
+
         ggml_tensor * out = ggml_mul_mat_id(ctx, as, b, ids);
         ggml_set_name(out, "out");
 
         for (uint32_t i = 1; i < o; ++i) {
             ggml_tensor * a2 = ggml_new_tensor_3d(ctx, type_a, k, m, n_mats);
+            add_aux_tensors(ctx);
             ggml_tensor * out2 = ggml_mul_mat_id(ctx, a2, b, ids);
             ggml_set_name(out2, "out2");
             out = ggml_add(ctx, out, out2);
@@ -5627,6 +5640,8 @@ struct test_mul_mat_vec_fusion : public test_case {
             ggml_tensor * gate = with_gate ? ggml_new_tensor(ctx, type, 4, ne0.data()) : nullptr;
             ggml_tensor * up   = ggml_new_tensor(ctx, type, 4, ne0.data());
 
+            add_aux_tensors(ctx);
+
             ggml_tensor * ffn_up = ggml_mul_mat(ctx, up, cur);
             if (with_bias) {
                 std::array<int64_t, 4> bias_ne = { ffn_up->ne[0], 1, channels, samples };
@@ -5660,6 +5675,8 @@ struct test_mul_mat_vec_fusion : public test_case {
 
             ggml_tensor * cur = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k, this->b ? 1 : n_used, m);
             ggml_set_name(cur, "cur");
+
+            add_aux_tensors(ctx);
 
             ggml_tensor * ffn_up = ggml_mul_mat_id(ctx, ups, cur, ids);
             if (with_bias) {

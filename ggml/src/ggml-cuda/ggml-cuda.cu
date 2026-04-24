@@ -2382,73 +2382,6 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
     return use_mul_mat_vec_q;
 }
 
-// Multiply all elements of dst (F32) by the scalar stored at scale_ptr (device pointer).
-// Used to apply the NVFP4 per-tensor correction scale after a MUL_MAT kernel.
-static __global__ void nvfp4_apply_correction_scale(float * __restrict__ dst, const float * __restrict__ scale_ptr,
-                                                    const int64_t nelements) {
-    const float scale = scale_ptr[0];
-    const int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < nelements) {
-        dst[i] *= scale;
-    }
-}
-
-static __global__ void nvfp4_apply_correction_scale_mmid(
-        float * __restrict__ dst,
-        const float * __restrict__ scale_ptr,
-        const char * __restrict__ ids,
-        const int64_t ne0,
-        const int64_t ne1,
-        const int64_t ne2,
-        const size_t nb1,
-        const size_t nb2,
-        const size_t ids_nb0,
-        const size_t ids_nb1,
-        const int64_t n_scales) {
-    const int64_t outer = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
-    const int64_t total = ne1 * ne2;
-    if (outer >= total) {
-        return;
-    }
-
-    const int64_t i1 = outer % ne1;
-    const int64_t i2 = outer / ne1;
-    const int32_t expert = *(const int32_t *) (ids + i2*ids_nb1 + i1*ids_nb0);
-    const float scale = scale_ptr[n_scales == 1 ? 0 : expert];
-
-    float * dst_row = (float *) ((char *) dst + i1*nb1 + i2*nb2);
-    for (int64_t i0 = 0; i0 < ne0; ++i0) {
-        dst_row[i0] *= scale;
-    }
-}
-
-static void ggml_cuda_apply_nvfp4_correction_scale_mmid(
-        ggml_backend_cuda_context & ctx,
-        ggml_tensor * dst,
-        const ggml_tensor * ids,
-        const ggml_tensor * w_scale) {
-    if (w_scale == nullptr) {
-        return;
-    }
-
-    const int64_t n_scales = ggml_nelements(w_scale);
-    GGML_ASSERT(n_scales == 1 || n_scales == dst->src[0]->ne[2]);
-
-    const int blk = 256;
-    const int64_t total = dst->ne[1] * dst->ne[2];
-    const int64_t grid = (total + blk - 1) / blk;
-
-    nvfp4_apply_correction_scale_mmid<<<grid, blk, 0, ctx.stream()>>>(
-            (float *) dst->data,
-            (const float *) w_scale->data,
-            (const char *) ids->data,
-            dst->ne[0], dst->ne[1], dst->ne[2],
-            dst->nb[1], dst->nb[2],
-            ids->nb[0], ids->nb[1],
-            n_scales);
-    CUDA_CHECK(cudaGetLastError());
-}
-
 static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     const bool split = ggml_backend_buft_is_cuda_split(src0->buffer->buft);
 
@@ -2533,24 +2466,12 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
     }
 
-    // Apply NVFP4 per-tensor correction scale to the output (if present).
-    // The scale tensor lives in GPU memory as src0->src[0]; multiply every F32 output element by it.
-    const ggml_tensor * w_scale = ggml_get_weight_scale(src0);
-    if (w_scale != nullptr) {
-        const float   * scale_ptr = (const float *) w_scale->data;
-        float         * dst_d     = (float *) dst->data;
-        const int64_t   nels      = ggml_nelements(dst);
-        const int       blk       = 256;
-        const int64_t   grid      = (nels + blk - 1) / blk;
-        nvfp4_apply_correction_scale<<<grid, blk, 0, ctx.stream()>>>(dst_d, scale_ptr, nels);
-    }
 }
 
 static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
     const ggml_tensor * ids  = dst->src[2];
-    const ggml_tensor * w_scale = ggml_get_weight_scale(src0);
 
     GGML_ASSERT(src1->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type  == GGML_TYPE_F32);
@@ -2568,13 +2489,11 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
                 const int mmvq_mmid_max = get_mmvq_mmid_max_batch(src0->type, cc);
                 if (ne2 <= mmvq_mmid_max) {
                     ggml_cuda_mul_mat_vec_q(ctx, src0, src1, ids, dst);
-                    ggml_cuda_apply_nvfp4_correction_scale_mmid(ctx, dst, ids, w_scale);
                     return;
                 }
             } else {
                 if (GGML_CUDA_CC_IS_AMD(cc)) {
                     ggml_cuda_mul_mat_vec_f(ctx, src0, src1, ids, dst);
-                    ggml_cuda_apply_nvfp4_correction_scale_mmid(ctx, dst, ids, w_scale);
                     return;
                 }
             }
@@ -2582,13 +2501,11 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
         if (ggml_cuda_should_use_mmq(src0->type, cc, ne12, /*n_experts=*/ne02)) {
             ggml_cuda_mul_mat_q(ctx, src0, src1, ids, dst);
-            ggml_cuda_apply_nvfp4_correction_scale_mmid(ctx, dst, ids, w_scale);
             return;
         }
 
         if (ggml_cuda_should_use_mmf(src0->type, cc, WARP_SIZE, src0->ne, src0->nb, src1->ne[2], /*mul_mat_id=*/true)) {
             ggml_cuda_mul_mat_f(ctx, src0, src1, ids, dst);
-            ggml_cuda_apply_nvfp4_correction_scale_mmid(ctx, dst, ids, w_scale);
             return;
         }
     }
@@ -2710,7 +2627,6 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         ne_get_rows, 1, 1, sizeof(int32_t), ne_get_rows*sizeof(int32_t), ne_get_rows*sizeof(int32_t),
         nb1, nb2, nb3, stream);
 
-    ggml_cuda_apply_nvfp4_correction_scale_mmid(ctx, dst, ids, w_scale);
 }
 
 static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst) {

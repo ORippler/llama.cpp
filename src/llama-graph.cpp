@@ -966,14 +966,12 @@ ggml_tensor * llm_graph_context::build_cvec(
     return cvec->apply_to(ctx0, cur, il);
 }
 
-static bool ggml_tensor_has_bound_weight_scale(const ggml_tensor * tensor) {
-    return tensor != nullptr && ggml_get_weight_scale(tensor) != nullptr;
-}
-
 ggml_tensor * llm_graph_context::build_lora_mm(
           ggml_tensor * w,
-          ggml_tensor * cur,
-          ggml_tensor * w_s) const {
+        ggml_tensor * cur,
+        ggml_tensor * w_s) const {
+    GGML_UNUSED(w_s);
+
     ggml_tensor * res = ggml_mul_mat(ctx0, w, cur);
 
     for (const auto & lora : *loras) {
@@ -992,10 +990,6 @@ ggml_tensor * llm_graph_context::build_lora_mm(
 
         ab_cur = ggml_scale(ctx0, ab_cur, scale);
         res = ggml_add(ctx0, res, ab_cur);
-    }
-
-    if (w_s && !ggml_tensor_has_bound_weight_scale(w)) {
-        res = ggml_mul(ctx0, res, w_s);
     }
 
     return res;
@@ -1079,7 +1073,7 @@ llm_graph_qkv llm_graph_context::build_qkv(
 
     if (layer.wqkv) {
         // fused QKV path
-        ggml_tensor * qkv = build_lora_mm(layer.wqkv, cur, layer.wqkv_s);
+        ggml_tensor * qkv = build_lora_mm(layer.wqkv, cur);
         cb(qkv, "wqkv", il);
         if (layer.wqkv_b) {
             qkv = ggml_add(ctx0, qkv, layer.wqkv_b);
@@ -1099,7 +1093,7 @@ llm_graph_qkv llm_graph_context::build_qkv(
             ggml_row_size(qkv->type, n_embd_q + n_embd_kv));
     } else {
         // separate Q/K/V path
-        Qcur = build_lora_mm(layer.wq, cur, layer.wq_s);
+        Qcur = build_lora_mm(layer.wq, cur);
         cb(Qcur, "Qcur", il);
         if (layer.wq_b) {
             Qcur = ggml_add(ctx0, Qcur, layer.wq_b);
@@ -1109,7 +1103,7 @@ llm_graph_qkv llm_graph_context::build_qkv(
             Qcur = ggml_clamp(ctx0, Qcur, -hparams.f_clamp_kqv, hparams.f_clamp_kqv);
             cb(Qcur, "Qcur_clamped", il);
         }
-        Kcur = build_lora_mm(layer.wk, cur, layer.wk_s);
+        Kcur = build_lora_mm(layer.wk, cur);
         cb(Kcur, "Kcur", il);
         if (layer.wk_b) {
             Kcur = ggml_add(ctx0, Kcur, layer.wk_b);
@@ -1119,7 +1113,7 @@ llm_graph_qkv llm_graph_context::build_qkv(
             Kcur = ggml_clamp(ctx0, Kcur, -hparams.f_clamp_kqv, hparams.f_clamp_kqv);
             cb(Kcur, "Kcur_clamped", il);
         }
-        Vcur = build_lora_mm(layer.wv, cur, layer.wv_s);
+        Vcur = build_lora_mm(layer.wv, cur);
         cb(Vcur, "Vcur", il);
         if (layer.wv_b) {
             Vcur = ggml_add(ctx0, Vcur, layer.wv_b);
@@ -1157,17 +1151,16 @@ ggml_tensor * llm_graph_context::build_ffn(
      llm_ffn_op_type   type_op,
    llm_ffn_gate_type   type_gate,
                  int   il) const {
+        GGML_UNUSED(up_s);
+        GGML_UNUSED(gate_s);
+        GGML_UNUSED(down_s);
+
     ggml_tensor * tmp = up ? build_lora_mm(up, cur) : cur;
     cb(tmp, "ffn_up", il);
 
     if (up_b) {
         tmp = ggml_add(ctx0, tmp, up_b);
         cb(tmp, "ffn_up_b", il);
-    }
-
-    if (up_s && !ggml_tensor_has_bound_weight_scale(up)) {
-        tmp = ggml_mul(ctx0, tmp, up_s);
-        cb(tmp, "ffn_up_s", il);
     }
 
     if (gate) {
@@ -1187,11 +1180,6 @@ ggml_tensor * llm_graph_context::build_ffn(
         if (gate_b) {
             cur = ggml_add(ctx0, cur, gate_b);
             cb(cur, "ffn_gate_b", il);
-        }
-
-        if (gate_s && !ggml_tensor_has_bound_weight_scale(gate)) {
-            cur = ggml_mul(ctx0, cur, gate_s);
-            cb(cur, "ffn_gate_s", il);
         }
 
     } else {
@@ -1298,11 +1286,6 @@ ggml_tensor * llm_graph_context::build_ffn(
         cur = ggml_add(ctx0, cur, down_b);
     }
 
-    if (down_s && !ggml_tensor_has_bound_weight_scale(down)) {
-        cur = ggml_mul(ctx0, cur, down_s);
-        cb(cur, "ffn_down_s", il);
-    }
-
     return cur;
 }
 
@@ -1372,6 +1355,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          ggml_tensor * up_exps_s,
          ggml_tensor * gate_exps_s,
          ggml_tensor * down_exps_s) const {
+        GGML_UNUSED(up_exps_s);
+        GGML_UNUSED(gate_exps_s);
+        GGML_UNUSED(down_exps_s);
+
     const int64_t n_embd   = cur->ne[0];
     const int64_t n_tokens = cur->ne[1];
     const bool weight_before_ffn = arch == LLM_ARCH_LLAMA4; // for llama4, we apply the sigmoid-ed weights before the FFN
@@ -1523,15 +1510,6 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             cb(gate_up, "ffn_moe_gate_up_biased", il);
         }
 
-        // apply per-expert scale2 to merged gate_up (use up_exps_s since gate and up are fused)
-        if (up_exps_s && !ggml_tensor_has_bound_weight_scale(gate_up_exps)) {
-            ggml_tensor * s = ggml_reshape_3d(ctx0, up_exps_s, 1, n_expert, 1);
-            s = ggml_repeat_4d(ctx0, s, 1, n_expert, n_tokens, 1);
-            s = ggml_get_rows(ctx0, s, selected_experts); // [1, n_expert_used, n_tokens]
-            gate_up = ggml_mul(ctx0, gate_up, s);
-            cb(gate_up, "ffn_moe_gate_up_scaled", il);
-        }
-
         const int64_t n_ff = gate_up->ne[0] / 2;
         cur = ggml_view_3d(ctx0, gate_up, n_ff, gate_up->ne[1], gate_up->ne[2], gate_up->nb[1], gate_up->nb[2], 0);
         cb(cur, "ffn_moe_gate", il);
@@ -1547,15 +1525,6 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             cb(up, "ffn_moe_up_biased", il);
         }
 
-        // apply per-expert scale2 to up
-        if (up_exps_s && !ggml_tensor_has_bound_weight_scale(up_exps)) {
-            ggml_tensor * s = ggml_reshape_3d(ctx0, up_exps_s, 1, n_expert, 1);
-            s = ggml_repeat_4d(ctx0, s, 1, n_expert, n_tokens, 1);
-            s = ggml_get_rows(ctx0, s, selected_experts); // [1, n_expert_used, n_tokens]
-            up = ggml_mul(ctx0, up, s);
-            cb(up, "ffn_moe_up_scaled", il);
-        }
-
         if (gate_exps) {
             cur = build_lora_mm_id(gate_exps, cur, selected_experts); // [n_ff, n_expert_used, n_tokens]
             cb(cur, "ffn_moe_gate", il);
@@ -1568,14 +1537,6 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             cb(cur, "ffn_moe_gate_biased", il);
         }
 
-        // apply per-expert scale2 to gate
-        if (gate_exps_s && !ggml_tensor_has_bound_weight_scale(gate_exps)) {
-            ggml_tensor * s = ggml_reshape_3d(ctx0, gate_exps_s, 1, n_expert, 1);
-            s = ggml_repeat_4d(ctx0, s, 1, n_expert, n_tokens, 1);
-            s = ggml_get_rows(ctx0, s, selected_experts); // [1, n_expert_used, n_tokens]
-            cur = ggml_mul(ctx0, cur, s);
-            cb(cur, "ffn_moe_gate_scaled", il);
-        }
     }
 
     const bool has_gate = gate_exps || gate_up_exps;
@@ -1653,15 +1614,6 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
     if (down_exps_b) {
         experts = ggml_add_id(ctx0, experts, down_exps_b, selected_experts);
         cb(experts, "ffn_moe_down_biased", il);
-    }
-
-    // apply per-expert scale2 to down
-    if (down_exps_s && !ggml_tensor_has_bound_weight_scale(down_exps)) {
-        ggml_tensor * s = ggml_reshape_3d(ctx0, down_exps_s, 1, n_expert, 1);
-        s = ggml_repeat_4d(ctx0, s, 1, n_expert, n_tokens, 1);
-        s = ggml_get_rows(ctx0, s, selected_experts); // [1, n_expert_used, n_tokens]
-        experts = ggml_mul(ctx0, experts, s);
-        cb(experts, "ffn_moe_down_scaled", il);
     }
 
     if (!weight_before_ffn) {
@@ -2104,6 +2056,7 @@ ggml_tensor * llm_graph_context::build_attn(
             float     kq_scale,
             int       il) const {
     GGML_UNUSED(n_tokens);
+    GGML_UNUSED(wo_s);
 
     // these nodes are added to the graph together so that they are not reordered
     // by doing so, the number of splits in the graph is reduced
@@ -2128,7 +2081,7 @@ ggml_tensor * llm_graph_context::build_attn(
     cb(cur, "kqv_out", il);
 
     if (wo) {
-        cur = build_lora_mm(wo, cur, wo_s);
+        cur = build_lora_mm(wo, cur);
     }
 
     if (wo_b) {
@@ -2189,6 +2142,7 @@ ggml_tensor * llm_graph_context::build_attn(
             float     kq_scale,
             int       il) const {
     GGML_ASSERT(v_mla == nullptr);
+    GGML_UNUSED(wo_s);
 
     if (inp->self_k_rot) {
         q_cur = ggml_mul_mat_aux(ctx0, q_cur, inp->self_k_rot);
@@ -2235,11 +2189,8 @@ ggml_tensor * llm_graph_context::build_attn(
             // GLM4, GLM4_MOE, and JAIS2 seem to have numerical issues with half-precision accumulators
             cur = build_lora_mm(wo, cur);
             ggml_mul_mat_set_prec(cur, GGML_PREC_F32);
-            if (wo_s && !ggml_tensor_has_bound_weight_scale(wo)) {
-                cur = ggml_mul(ctx0, cur, wo_s);
-            }
         } else {
-            cur = build_lora_mm(wo, cur, wo_s);
+            cur = build_lora_mm(wo, cur);
         }
     }
 
@@ -2292,6 +2243,8 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * v_mla,
             float     kq_scale,
             int       il) const {
+    GGML_UNUSED(wo_s);
+
     // these nodes are added to the graph together so that they are not reordered
     // by doing so, the number of splits in the graph is reduced
     // expand k later to enable rope fusion which directly writes into k-v cache
@@ -2322,11 +2275,8 @@ ggml_tensor * llm_graph_context::build_attn(
             // GLM4 and GLM4_MOE seem to have numerical issues with half-precision accumulators
             cur = build_lora_mm(wo, cur);
             ggml_mul_mat_set_prec(cur, GGML_PREC_F32);
-            if (wo_s && !ggml_tensor_has_bound_weight_scale(wo)) {
-                cur = ggml_mul(ctx0, cur, wo_s);
-            }
         } else {
-            cur = build_lora_mm(wo, cur, wo_s);
+            cur = build_lora_mm(wo, cur);
         }
     }
 
@@ -2350,6 +2300,8 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * v_mla,
             float     kq_scale,
             int       il) const {
+    GGML_UNUSED(wo_s);
+
     const bool is_swa = hparams.is_swa(il);
 
     auto * k_rot = is_swa ? inp->self_k_rot_swa : inp->self_k_rot;
@@ -2410,7 +2362,7 @@ ggml_tensor * llm_graph_context::build_attn(
     }
 
     if (wo) {
-        cur = build_lora_mm(wo, cur, wo_s);
+        cur = build_lora_mm(wo, cur);
     }
 
     if (wo_b) {
@@ -2450,6 +2402,8 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * v_mla,
             float     kq_scale,
             int       il) const {
+    GGML_UNUSED(wo_s);
+
     // these nodes are added to the graph together so that they are not reordered
     // by doing so, the number of splits in the graph is reduced
     ggml_build_forward_expand(gf, q_cur);
@@ -2466,7 +2420,7 @@ ggml_tensor * llm_graph_context::build_attn(
     cb(cur, "kqv_out", il);
 
     if (wo) {
-        cur = build_lora_mm(wo, cur, wo_s);
+        cur = build_lora_mm(wo, cur);
     }
 
     if (wo_b) {

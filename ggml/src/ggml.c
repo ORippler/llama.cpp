@@ -996,6 +996,10 @@ const struct ggml_tensor * ggml_get_weight_scale(const struct ggml_tensor * t) {
         return NULL;
     }
 
+    if (leaf->src[0] == NULL) {
+        return NULL;
+    }
+
     // Scales invalidated on this tensor (e.g. after permutation)
     if (t->flags & GGML_TENSOR_FLAG_SCALES_INVALID && ggml_nelements(leaf->src[0]) != 1) {
         return NULL;
@@ -1014,11 +1018,38 @@ const struct ggml_tensor * ggml_get_act_scale(const struct ggml_tensor * t) {
         return NULL;
     }
 
+    if (leaf->src[0] == NULL) {
+        return NULL;
+    }
+
     if (t->flags & GGML_TENSOR_FLAG_SCALES_INVALID && ggml_nelements(leaf->src[0]) != 1) {
         return NULL;
     }
 
     return leaf->src[1];  // activation correction scale (F32, optional)
+}
+
+static void ggml_validate_derived_matmul_operand(const struct ggml_tensor * t) {
+    GGML_ASSERT(t != NULL);
+
+    const struct ggml_tensor * leaf = (t->view_src != NULL) ? t->view_src : t;
+    if (!ggml_get_type_traits(leaf->type)->is_derived) {
+        return;
+    }
+
+    GGML_ASSERT(leaf->src[0] != NULL && "derived matmul weights must have src[0] scale attached");
+
+    const struct ggml_tensor * w_scale = ggml_get_weight_scale(t);
+    GGML_ASSERT(w_scale != NULL && "derived matmul weights must have a valid weight scale");
+    GGML_ASSERT(w_scale->type == GGML_TYPE_F32 && "derived matmul weight scale must be F32");
+
+    const struct ggml_tensor * act_scale = ggml_get_act_scale(t);
+    GGML_ASSERT(act_scale == NULL || act_scale->type == GGML_TYPE_F32);
+}
+
+static struct ggml_tensor * ggml_get_scale_leaf_mut(struct ggml_tensor * t) {
+    GGML_ASSERT(t != NULL);
+    return t->view_src != NULL ? t->view_src : t;
 }
 
 //
@@ -3323,13 +3354,10 @@ static inline bool ggml_can_mul_mat(const struct ggml_tensor * t0, const struct 
            (t1->ne[3]%t0->ne[3] == 0);
 }
 
-struct ggml_tensor * ggml_mul_mat(
+static struct ggml_tensor * ggml_mul_mat_raw(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
         struct ggml_tensor  * b) {
-    GGML_ASSERT(ggml_can_mul_mat(a, b));
-    GGML_ASSERT(!ggml_is_transposed(a));
-
     const int64_t ne[4] = { a->ne[1], b->ne[1], b->ne[2], b->ne[3] };
     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
 
@@ -3340,9 +3368,49 @@ struct ggml_tensor * ggml_mul_mat(
     return result;
 }
 
+static struct ggml_tensor * ggml_apply_mul_mat_weight_scale(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * result,
+        struct ggml_tensor  * weight) {
+    struct ggml_tensor * leaf = ggml_get_scale_leaf_mut(weight);
+    struct ggml_tensor * w_scale = leaf->src[0];
+    if (w_scale == NULL) {
+        return result;
+    }
+
+    GGML_ASSERT(w_scale->type == GGML_TYPE_F32);
+
+    if (ggml_nelements(w_scale) == 1) {
+        return ggml_mul(ctx, result, w_scale);
+    }
+
+    GGML_ASSERT(ggml_nelements(w_scale) == weight->ne[1]);
+
+    struct ggml_tensor * scale = ggml_reshape_4d(ctx, w_scale, result->ne[0], 1, 1, 1);
+    return ggml_mul(ctx, result, scale);
+}
+
+struct ggml_tensor * ggml_mul_mat(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        struct ggml_tensor  * b) {
+    GGML_ASSERT(ggml_can_mul_mat(a, b));
+    GGML_ASSERT(!ggml_is_transposed(a));
+    ggml_validate_derived_matmul_operand(a);
+
+    struct ggml_tensor * result = ggml_mul_mat_raw(ctx, a, b);
+    return ggml_apply_mul_mat_weight_scale(ctx, result, a);
+}
+
 void ggml_mul_mat_set_prec(
         struct ggml_tensor * a,
         enum ggml_prec       prec) {
+    if (a->op == GGML_OP_MUL && a->src[0] != NULL && a->src[0]->op == GGML_OP_MUL_MAT) {
+        a = a->src[0];
+    } else if (a->op == GGML_OP_MUL && a->src[1] != NULL && a->src[1]->op == GGML_OP_MUL_MAT) {
+        a = a->src[1];
+    }
+
     GGML_ASSERT(a->op == GGML_OP_MUL_MAT);
 
     const int32_t prec_i32 = (int32_t) prec;
@@ -3371,6 +3439,7 @@ struct ggml_tensor * ggml_mul_mat_id(
         struct ggml_tensor  * ids) {
     GGML_ASSERT(!ggml_is_transposed(as));
     GGML_ASSERT(ids->type == GGML_TYPE_I32);
+    ggml_validate_derived_matmul_operand(as);
 
     GGML_ASSERT(as->ne[3] == 1); // as is 3d (one matrix per expert)
     GGML_ASSERT(b->ne[3] == 1); // b is 3d
@@ -3387,7 +3456,24 @@ struct ggml_tensor * ggml_mul_mat_id(
     result->src[1] = b;
     result->src[2] = ids;
 
-    return result;
+    struct ggml_tensor * leaf = ggml_get_scale_leaf_mut(as);
+    struct ggml_tensor * w_scale = leaf->src[0];
+    if (w_scale == NULL) {
+        return result;
+    }
+
+    GGML_ASSERT(w_scale->type == GGML_TYPE_F32);
+
+    if (ggml_nelements(w_scale) == 1) {
+        return ggml_mul(ctx, result, w_scale);
+    }
+
+    GGML_ASSERT(ggml_nelements(w_scale) == as->ne[2]);
+
+    struct ggml_tensor * scale = ggml_reshape_3d(ctx, w_scale, 1, as->ne[2], 1);
+    scale = ggml_repeat_4d(ctx, scale, 1, as->ne[2], b->ne[2], 1);
+    scale = ggml_get_rows(ctx, scale, ids);
+    return ggml_mul(ctx, result, scale);
 }
 
 // ggml_out_prod
