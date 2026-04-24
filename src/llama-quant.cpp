@@ -707,9 +707,9 @@ static ggml_type llama_tensor_get_type(quantize_state_impl & qs, const llama_mod
 //
 
 static size_t llama_tensor_quantize_impl(enum ggml_type new_type, const float * f32_data, void * new_data, const int64_t chunk_size, int64_t nrows, int64_t n_per_row, const float * imatrix, std::vector<std::thread> & workers, const int nthread, float * scales_out = nullptr) {
-    // NVFP4 uses a per-tensor correction scale computed over all rows at once;
+    // Derived tensors use a per-tensor correction scale computed over all rows at once;
     // multi-threaded chunking would produce per-chunk scales instead, so force single-threaded.
-    if (nthread < 2 || new_type == GGML_TYPE_NVFP4) {
+    if (nthread < 2 || ggml_get_type_traits(new_type)->is_derived) {
         // single-thread
         size_t new_size = ggml_quantize_chunk(new_type, f32_data, new_data, 0, nrows, n_per_row, imatrix, scales_out);
         if (!ggml_validate_row_data(new_type, new_data, new_size)) {
@@ -1264,7 +1264,6 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
             // write tensor data + padding
             fout.write((const char *) new_data, new_size);
             zeros(fout, GGML_PAD(new_size, align) - new_size);
-            
         } // no --dry-run
     } // main loop
 
