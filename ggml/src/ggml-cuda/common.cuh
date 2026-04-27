@@ -29,6 +29,10 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
+
 #if defined(GGML_USE_HIP)
 #include "vendors/hip.h"
 #elif defined(GGML_USE_MUSA)
@@ -850,6 +854,107 @@ __device__ __forceinline__ uint8_t ggml_cuda_float_to_fp4_e2m1(float x, float e)
     }
 
     return static_cast<uint8_t>(best_i | sign_bit);
+}
+
+struct fdiv_u64_consts {
+    uint64_t mp; // magic number
+    uint64_t d;  // divisor
+    uint8_t L; // need at most 6 bits to represent L
+};
+
+
+static inline uint8_t floor_log2(uint64_t x) {
+#if defined(__GNUC__) || defined(__clang__)
+    return 63 - __builtin_clzll(x);
+#elif defined(_MSC_VER)
+    // MSVC: _BitScanReverse64 finds the index of the MSB (0 to 63)
+    unsigned long exp;
+    _BitScanReverse64(&exp, x);
+    return exp;
+#else
+    GGML_ABORT("floor_log2 not implemented for this compiler");
+#endif
+}
+
+static inline int clz64_local(uint64_t x) {
+#if defined(__GNUC__) || defined(__clang__)
+    return x ? __builtin_clzll(x) : 64;
+#elif defined(_MSC_VER)
+    unsigned long idx;
+    if (_BitScanReverse64(&idx, x)) {
+        return 63 - static_cast<int>(idx);
+    }
+    return 64;
+#else
+    GGML_ABORT("clz64_local not implemented for this compiler");
+#endif
+}
+
+static inline uint64_t div_128_by_64(uint64_t num_hi, uint64_t num_lo, uint64_t den, uint64_t *rem_out) {
+    // Handle division by zero
+    if (den == 0) {
+        if (rem_out) *rem_out = ~0ull;
+        return ~0ull;
+    }
+
+    // Handle quotient overflow (i.e. when the quotient would be >= 2^64)
+    if (num_hi >= den) {
+        if (rem_out) *rem_out = ~0ull;
+        return ~0ull;
+    }
+
+#if defined(__SIZEOF_INT128__)
+    const unsigned __int128 num = (static_cast<unsigned __int128>(num_hi) << 64) | num_lo;
+    const uint64_t q = num / den;
+    if (rem_out) {
+        *rem_out = num % den;
+    }
+    return q;
+#elif defined(_MSC_VER) && defined(_M_X64)
+    // TODO: Verify logic here on Windows system
+    unsigned __int64 rem = 0;
+    const uint64_t q = _udiv128(num_hi, num_lo, den, &rem);
+    if (rem_out) {
+        *rem_out = rem;
+    }
+    return q;
+#else
+    GGML_ABORT("div_128_by_64 not implemented for this compiler");
+#endif
+}
+
+static fdiv_u64_consts init_fastdiv_u64(uint64_t d) {
+    GGML_ASSERT(d != 0);
+
+    uint8_t floor_log = floor_log2(d);
+
+    // If d is a power of 2, we can just do a right shift.
+    if ((d & (d - 1)) == 0) {
+        return {0, d, floor_log};
+    }
+
+    uint64_t rem = 0;
+    uint64_t proposed_m = div_128_by_64(uint64_t{1} << floor_log, 0, d, &rem);
+
+    proposed_m <<= 1;
+    const uint64_t twice_rem = rem + rem;
+    if (twice_rem >= d || twice_rem < rem) {
+        proposed_m += 1;
+    }
+
+    const uint64_t magic = proposed_m + 1;
+    return {magic, d, floor_log};
+}
+
+static __device__ __forceinline__ uint64_t fastdiv_u64(uint64_t n, fdiv_u64_consts c) {
+    // For divisors that are powers of 2, we can just do a right shift.
+    if (c.mp == 0) {
+        return n >> c.L;
+    }
+
+    uint64_t q = __umul64hi(n, c.mp);
+    uint64_t t = ((n - q) >> 1) + q;
+    return t >> c.L;
 }
 
 // See https://gmplib.org/~tege/divcnst-pldi94.pdf figure 4.1.
