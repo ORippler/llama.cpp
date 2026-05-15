@@ -143,7 +143,7 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
 
         cur = build_attn(inp_attn,
                 model.layers[il].wo, NULL, model.layers[il].wo_s,
-                q, k, v, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il);
+                q, k, v, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il, model.layers[il].wo_in_s);
 
         cb(cur, "model.layers.{}.self_attn.out_proj", il);
 

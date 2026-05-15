@@ -167,7 +167,7 @@ llama_model_exaone_moe::graph::graph(const llama_model & model, const llm_graph_
 
             cur = build_attn(inp_attn_iswa,
                 model.layers[il].wo, NULL, model.layers[il].wo_s,
-                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il);
+                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il, model.layers[il].wo_in_s);
             cb(cur, "attn_out", il);
         }
         if (il == n_transformer_layers - 1 && inp_out_ids) {

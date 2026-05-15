@@ -151,7 +151,7 @@ llama_model_falcon_h1::graph::graph(const llama_model & model, const llm_graph_p
 
         ggml_tensor * attn_out = build_attn(inp->get_attn(),
                                     model.layers[il].wo, NULL, model.layers[il].wo_s,
-                                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+                                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il, model.layers[il].wo_in_s);
         cb(attn_out, "attn_out", il);
 
         cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);

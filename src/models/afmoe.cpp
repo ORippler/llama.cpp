@@ -176,7 +176,7 @@ llama_model_afmoe::graph::graph(const llama_model & model, const llm_graph_param
 
             cur = build_attn(inp_attn,
                     NULL, NULL, NULL,  // wo will be applied after gating
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il, nullptr);
             cb(cur, "attn_out", il);
 
             // attention gating: attn_out * sigmoid(gate) BEFORE o_proj

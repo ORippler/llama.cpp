@@ -243,7 +243,7 @@ ggml_tensor * llama_model_plamo2::graph::build_plamo2_attn_layer(llm_graph_input
 
         cur = build_attn(inp,
             model.layers[il].wo, NULL, model.layers[il].wo_s,
-            Qcur, Kcur, Vcur, NULL, NULL, NULL, 1.0f / sqrtf(float(n_embd_head_v)), il);
+            Qcur, Kcur, Vcur, NULL, NULL, NULL, 1.0f / sqrtf(float(n_embd_head_v)), il, model.layers[il].wo_in_s);
     }
 
     cb(cur, "attn_out", il);

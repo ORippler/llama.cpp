@@ -236,12 +236,13 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
 
             cur = build_attn(inp_attn, model.layers[il].wo,
                     nullptr, model.layers[il].wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr,
-                    hparams.f_attention_scale, il);
+                    hparams.f_attention_scale, il, model.layers[il].wo_in_s);
         } else {
             // reuse KV cache of earlier layers
             cur = build_attn(inp_attn,
                     model.layers[il].wo, nullptr, model.layers[il].wo_s,
-                    Qcur, nullptr, nullptr, nullptr, nullptr, nullptr, hparams.f_attention_scale, il);
+                    Qcur, nullptr, nullptr, nullptr, nullptr, nullptr, hparams.f_attention_scale, il,
+                    model.layers[il].wo_in_s);
         }
 
         // TODO @ngxson : strip unused token right after the last KV layer to speed up prompt processing

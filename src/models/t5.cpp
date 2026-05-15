@@ -160,7 +160,7 @@ llama_model_t5::graph<false>::graph(const llama_model & model, const llm_graph_p
 
             cur = build_attn(inp_attn_self,
                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, kq_b, nullptr, nullptr, 1.0f, il);
+                    Qcur, Kcur, Vcur, kq_b, nullptr, nullptr, 1.0f, il, model.layers[il].wo_in_s);
             cb(cur, "kqv_out", il);
         }
         cur = ggml_add(ctx0, cur, inpSA);
@@ -191,7 +191,7 @@ llama_model_t5::graph<false>::graph(const llama_model & model, const llm_graph_p
 
             cur = build_attn(inp_attn_cross,
                     model.layers[il].wo_cross, nullptr, nullptr,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f, il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f, il, nullptr);
             cb(cur, "kqv_out", il);
 
             //ggml_tensor * q =                 ggml_permute(ctx0, Qcur, 0, 2, 1, 3);
@@ -319,7 +319,7 @@ llama_model_t5::graph<true>::graph(const llama_model & model, const llm_graph_pa
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo_enc, nullptr, nullptr,
-                    Qcur, Kcur, Vcur, kq_b, nullptr, nullptr, 1.0f, il);
+                    Qcur, Kcur, Vcur, kq_b, nullptr, nullptr, 1.0f, il, nullptr);
             cb(cur, "kqv_out", il);
         }
         if (il == n_layer - 1 && inp_out_ids) {

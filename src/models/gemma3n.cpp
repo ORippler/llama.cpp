@@ -173,7 +173,7 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
 
             cur = build_attn(inp_attn, model.layers[il].wo,
                     NULL, model.layers[il].wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr,
-                    hparams.f_attention_scale, il);
+                    hparams.f_attention_scale, il, model.layers[il].wo_in_s);
         } else {
             // reuse KV cache of earlier layers
             ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur);
@@ -189,7 +189,8 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, NULL, model.layers[il].wo_s,
-                    Qcur, nullptr, nullptr, nullptr, nullptr, nullptr, hparams.f_attention_scale, il);
+                    Qcur, nullptr, nullptr, nullptr, nullptr, nullptr, hparams.f_attention_scale, il,
+                    model.layers[il].wo_in_s);
         }
         cur = build_norm(cur, model.layers[il].attn_post_norm, NULL, LLM_NORM_RMS, il);
         cb(cur, "attn_post_norm", il);

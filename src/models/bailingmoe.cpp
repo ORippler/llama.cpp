@@ -108,7 +108,7 @@ llama_model_bailingmoe::graph::graph(const llama_model & model, const llm_graph_
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_rot)), il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_rot)), il, model.layers[il].wo_in_s);
         }
 
         if (il == n_layer - 1 && inp_out_ids) {

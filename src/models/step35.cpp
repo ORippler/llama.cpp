@@ -171,7 +171,7 @@ llama_model_step35::graph::graph(const llama_model & model, const llm_graph_para
             const float kq_scale = 1.0f / sqrtf(float(n_embd_head_k));
             ggml_tensor * attn_out = build_attn(inp_attn,
                     nullptr, nullptr, nullptr,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il, nullptr);
             cb(attn_out, "attn_out", il);
             // head-wise attention gate: sigmoid(g_proj(x)) in torch
             if (model.layers[il].wqkv_gate) {

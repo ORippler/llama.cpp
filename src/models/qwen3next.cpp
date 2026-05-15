@@ -263,7 +263,7 @@ ggml_tensor * llama_model_qwen3next::graph::build_layer_attn(
 
     cur = build_attn(inp,
                 nullptr, nullptr, nullptr,
-                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il, nullptr);
     cb(cur, "attn_pregate", il);
 
     // TODO: CUDA is missing non-contiguous unary ops. when implemented: remove this cont

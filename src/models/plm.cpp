@@ -165,7 +165,7 @@ llama_model_plm::graph::graph(const llama_model & model, const llm_graph_params 
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, NULL, model.layers[il].wo_s,
-                    q_states, k_states, v_states, nullptr, nullptr, nullptr, kq_scale, il);
+                    q_states, k_states, v_states, nullptr, nullptr, nullptr, kq_scale, il, model.layers[il].wo_in_s);
         }
         if (il == n_layer - 1 && inp_out_ids) {
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);

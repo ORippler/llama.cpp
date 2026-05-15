@@ -189,7 +189,7 @@ ggml_tensor * llama_model_granite::graph::build_attention_layer(
     const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f/sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
     cur = build_attn(inp_attn,
             model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
-            Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+            Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il, model.layers[il].wo_in_s);
             cb(cur, "attn_out", il);
     return cur;
 }

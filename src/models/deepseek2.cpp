@@ -228,7 +228,7 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
 
             cur = build_attn(inp_attn_kv,
                         model.layers[il].wo, NULL, model.layers[il].wo_s,
-                        Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+                        Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il, model.layers[il].wo_in_s);
             cb(cur, "attn_out", il);
         }
         else {
@@ -326,7 +326,7 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
                 // note: MLA with the absorption optimization converts into MQA (ie: GQA with 1 group)
                 cur = build_attn(inp_attn_k,
                         model.layers[il].wo, NULL, model.layers[il].wo_s,
-                        Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, kq_scale, il);
+                        Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, kq_scale, il, model.layers[il].wo_in_s);
             } else {
                 ggml_tensor * kv = ggml_mul_mat(ctx0, model.layers[il].wkv_b, kv_cmpr);
                 cb(kv, "kv", il);
@@ -363,7 +363,7 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
                 // note: MLA without the absorption optimization converts into MHA (ie: GQA with full n_head groups)
                 cur = build_attn(inp_attn_kv,
                             model.layers[il].wo, NULL, model.layers[il].wo_s,
-                            Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+                            Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il, model.layers[il].wo_in_s);
             }
         }
         if (il == effective_n_layers - 1 && inp_out_ids) {

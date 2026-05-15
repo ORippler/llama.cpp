@@ -155,7 +155,7 @@ llama_model_gemma3::graph<iswa>::graph(const llama_model & model, const llm_grap
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, NULL, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f, il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f, il, model.layers[il].wo_in_s);
         }
         if (il == n_layer - 1 && inp_out_ids) {
             cur  = ggml_get_rows(ctx0,  cur, inp_out_ids);
