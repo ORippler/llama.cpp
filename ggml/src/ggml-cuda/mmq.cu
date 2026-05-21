@@ -126,6 +126,10 @@ void ggml_cuda_mul_mat_q(
     const ggml_tensor * scale_activations = src0->type == GGML_TYPE_NVFP4 ? (ids ? dst->src[4] : dst->src[3]) : nullptr;
     const float * scale_activations_d = scale_activations ? (const float *) scale_activations->data : nullptr;
     const int64_t n_scale_activations = scale_activations ? ggml_nelements(scale_activations) : 0;
+    if (use_native_fp4)
+    {
+        GGML_ASSERT(scale_activations != nullptr);
+    }
 
     if (!ids) {
         const size_t nbytes_src1_q8_1 = ne13*ne12 * ne11*ne10_padded * sizeof(block_q8_1)/QK8_1 +
