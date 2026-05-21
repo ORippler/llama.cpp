@@ -145,7 +145,15 @@ llama_model_rnd1::graph::graph(const llama_model & model, const llm_graph_params
                     LLM_FFN_SILU, true,
                     hparams.expert_weights_scale,
                     LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX,
-                    il);
+                    il,
+                    nullptr,
+                    nullptr,
+                    model.layers[il].ffn_up_exps_s,
+                    model.layers[il].ffn_gate_exps_s,
+                    model.layers[il].ffn_down_exps_s,
+                    model.layers[il].ffn_up_exps_in_s,
+                    model.layers[il].ffn_gate_exps_in_s,
+                    model.layers[il].ffn_down_exps_in_s);
         cb(moe_out, "ffn_moe_out", il);
         cur = moe_out;
 
@@ -167,7 +175,7 @@ llama_model_rnd1::graph::graph(const llama_model & model, const llm_graph_params
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

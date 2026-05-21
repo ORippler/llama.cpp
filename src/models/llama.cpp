@@ -242,7 +242,7 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
 
     if constexpr (!embed) {
         // lm_head
-        cur = build_lora_mm(model.output, cur, model.output_s);
+        cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
         cb(cur, "result_output", -1);
         res->t_logits = cur;

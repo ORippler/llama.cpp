@@ -181,7 +181,10 @@ llama_model_falcon_h1::graph::graph(const llama_model & model, const llm_graph_p
                 model.layers[il].ffn_up, model.layers[il].ffn_up_b, NULL,
                 model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
                 model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
-                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
+                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il,
+                model.layers[il].ffn_up_in_s,
+                model.layers[il].ffn_gate_in_s,
+                model.layers[il].ffn_down_in_s);
         cb(cur, "ffn_out", il);
 
         cur = ggml_add(ctx0, cur, inpSA);
@@ -200,7 +203,7 @@ llama_model_falcon_h1::graph::graph(const llama_model & model, const llm_graph_p
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

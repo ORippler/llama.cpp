@@ -126,7 +126,10 @@ llama_model_pangu_embed::graph::graph(const llama_model & model, const llm_graph
                 model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
                 model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                 NULL,
-                LLM_FFN_SILU, LLM_FFN_PAR, il);
+                LLM_FFN_SILU, LLM_FFN_PAR, il,
+                model.layers[il].ffn_up_in_s,
+                model.layers[il].ffn_gate_in_s,
+                model.layers[il].ffn_down_in_s);
 
         cur = ggml_add(ctx0, cur, ffn_inp);
         cb(cur, "ffn_out", il);
@@ -148,7 +151,7 @@ llama_model_pangu_embed::graph::graph(const llama_model & model, const llm_graph
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     if (model.output_b != nullptr) {
         cur = ggml_add(ctx0, cur, model.output_b);

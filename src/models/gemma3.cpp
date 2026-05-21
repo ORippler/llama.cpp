@@ -181,7 +181,10 @@ llama_model_gemma3::graph<iswa>::graph(const llama_model & model, const llm_grap
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
                     NULL,
-                    LLM_FFN_GELU, LLM_FFN_PAR, il);
+                    LLM_FFN_GELU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         }
         cur = build_norm(cur,
@@ -207,7 +210,7 @@ llama_model_gemma3::graph<iswa>::graph(const llama_model & model, const llm_grap
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     if (hparams.f_final_logit_softcapping) {
         cur = ggml_scale(ctx0, cur, 1.0f / hparams.f_final_logit_softcapping);

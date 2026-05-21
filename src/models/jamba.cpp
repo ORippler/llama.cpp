@@ -156,7 +156,10 @@ llama_model_jamba::graph::graph(const llama_model & model, const llm_graph_param
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
                     NULL,
-                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+                    LLM_FFN_SILU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         } else {
             // MoE branch
@@ -170,7 +173,15 @@ llama_model_jamba::graph::graph(const llama_model & model, const llm_graph_param
                     LLM_FFN_SILU, false,
                     hparams.expert_weights_scale,
                     LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX,
-                    il);
+                    il,
+                    nullptr,
+                    nullptr,
+                    model.layers[il].ffn_up_exps_s,
+                    model.layers[il].ffn_gate_exps_s,
+                    model.layers[il].ffn_down_exps_s,
+                    model.layers[il].ffn_up_exps_in_s,
+                    model.layers[il].ffn_gate_exps_in_s,
+                    model.layers[il].ffn_down_exps_in_s);
             cb(cur, "ffn_moe_out", il);
         }
         // residual
@@ -189,7 +200,7 @@ llama_model_jamba::graph::graph(const llama_model & model, const llm_graph_param
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

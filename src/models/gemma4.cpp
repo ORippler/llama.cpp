@@ -197,7 +197,7 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
         // this is to mirror Gemma4Attention in pytorch code
         ggml_tensor * Qcur;
         {
-            Qcur = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s);
+            Qcur = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s, model.layers[il].wq_in_s);
             cb(Qcur, "Qcur", il);
 
             Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head, n_tokens);
@@ -212,11 +212,11 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
 
         // self-attention
         if (hparams.has_kv(il)) {
-            ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur, model.layers[il].wk_s);
+            ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur, model.layers[il].wk_s, model.layers[il].wk_in_s);
             cb(Kcur, "Kcur", il);
 
             ggml_tensor * Vcur = model.layers[il].wv
-                                    ? build_lora_mm(model.layers[il].wv, cur, model.layers[il].wv_s)
+                                    ? build_lora_mm(model.layers[il].wv, cur, model.layers[il].wv_s, model.layers[il].wv_in_s)
                                     : Kcur; // if v_proj is not present, use Kcur as Vcur
             cb(Vcur, "Vcur", il);
 
@@ -272,7 +272,10 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
                     model.layers[il].ffn_gate, nullptr, model.layers[il].ffn_gate_s,
                     model.layers[il].ffn_down, nullptr, model.layers[il].ffn_down_s,
                     nullptr,
-                    LLM_FFN_GELU, LLM_FFN_PAR, il);
+                    LLM_FFN_GELU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cur_mlp = build_norm(cur_mlp,
                     model.layers[il].ffn_post_norm_1, nullptr,
                     LLM_NORM_RMS, il);
@@ -305,7 +308,10 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
                     model.layers[il].ffn_gate_up_exps,
                     model.layers[il].ffn_up_exps_s,
                     model.layers[il].ffn_gate_exps_s,
-                    model.layers[il].ffn_down_exps_s);
+                    model.layers[il].ffn_down_exps_s,
+                    model.layers[il].ffn_up_exps_in_s,
+                    model.layers[il].ffn_gate_exps_in_s,
+                    model.layers[il].ffn_down_exps_in_s);
             cur_moe = build_norm(cur_moe,
                     model.layers[il].ffn_post_norm_2, nullptr,
                     LLM_NORM_RMS, il);
@@ -324,7 +330,10 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
                     model.layers[il].ffn_gate, nullptr, model.layers[il].ffn_gate_s,
                     model.layers[il].ffn_down, nullptr, model.layers[il].ffn_down_s,
                     nullptr,
-                    LLM_FFN_GELU, LLM_FFN_PAR, il);
+                    LLM_FFN_GELU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         }
         cur = build_norm(cur,
@@ -381,7 +390,7 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     if (hparams.f_final_logit_softcapping) {
         cur = ggml_scale(ctx0, cur, 1.0f / hparams.f_final_logit_softcapping);

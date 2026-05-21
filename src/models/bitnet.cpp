@@ -103,7 +103,7 @@ llama_model_bitnet::graph::graph(const llama_model & model, const llm_graph_para
                     LLM_NORM_RMS, il);
             cb(cur, "attn_sub_norm", il);
 
-            cur = build_lora_mm(model.layers[il].wo, cur, model.layers[il].wo_s);
+            cur = build_lora_mm(model.layers[il].wo, cur, model.layers[il].wo_s, model.layers[il].wo_in_s);
             if (model.layers[il].wo_b) {
                 cur = ggml_add(ctx0, cur, model.layers[il].wo_b);
             }
@@ -129,7 +129,10 @@ llama_model_bitnet::graph::graph(const llama_model & model, const llm_graph_para
                 model.layers[il].ffn_gate, NULL, model.layers[il].ffn_gate_s,
                 NULL,                      NULL, NULL,
                 NULL,
-                LLM_FFN_SILU, LLM_FFN_PAR, il);
+                LLM_FFN_SILU, LLM_FFN_PAR, il,
+                model.layers[il].ffn_up_in_s,
+                model.layers[il].ffn_gate_in_s,
+                nullptr);
         cb(cur, "ffn_sub_out", il);
 
         cur = build_norm(cur,
@@ -137,7 +140,7 @@ llama_model_bitnet::graph::graph(const llama_model & model, const llm_graph_para
                 LLM_NORM_RMS, il);
         cb(cur, "ffn_sub_norm", il);
 
-        cur = build_lora_mm(model.layers[il].ffn_down, cur, model.layers[il].ffn_down_s);
+        cur = build_lora_mm(model.layers[il].ffn_down, cur, model.layers[il].ffn_down_s, model.layers[il].ffn_down_in_s);
         cb(cur, "ffn_down", il);
 
         cur = ggml_add(ctx0, cur, ffn_inp);

@@ -113,7 +113,7 @@ llama_model_deci::graph::graph(const llama_model & model, const llm_graph_params
         }
         if (n_head > 0 && n_head_kv == 0) {
             // "linear attention" of Llama-3_1-Nemotron-51B
-            cur = build_lora_mm(model.layers[il].wo, cur);
+            cur = build_lora_mm(model.layers[il].wo, cur, model.layers[il].wo_s, model.layers[il].wo_in_s);
             cb(cur, "wo", il);
         } else if (n_head > 0) {
             // self-attention
@@ -161,7 +161,10 @@ llama_model_deci::graph::graph(const llama_model & model, const llm_graph_params
                 model.layers[il].ffn_up, model.layers[il].ffn_up_b, NULL,
                 model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
                 model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
-                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
+                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         }
         cur = ggml_add(ctx0, cur, ffn_inp);
@@ -181,7 +184,7 @@ llama_model_deci::graph::graph(const llama_model & model, const llm_graph_params
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

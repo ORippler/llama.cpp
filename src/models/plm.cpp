@@ -184,7 +184,10 @@ llama_model_plm::graph::graph(const llama_model & model, const llm_graph_params 
                 NULL, NULL, NULL,
                 model.layers[il].ffn_down, NULL, NULL,
                 NULL,
-                LLM_FFN_RELU_SQR, LLM_FFN_SEQ, il);
+                LLM_FFN_RELU_SQR, LLM_FFN_SEQ, il,
+                model.layers[il].ffn_up_in_s,
+                nullptr,
+                model.layers[il].ffn_down_in_s);
         cb(cur, "ffn_out", il);
 
         cur = ggml_add(ctx0, cur, ffn_inp);
@@ -204,7 +207,7 @@ llama_model_plm::graph::graph(const llama_model & model, const llm_graph_params 
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

@@ -79,13 +79,13 @@ llama_model_olmoe::graph::graph(const llama_model & model, const llm_graph_param
         // self_attention
         {
             // compute Q and K and RoPE them
-            ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur);
+            ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s, model.layers[il].wq_in_s);
             cb(Qcur, "Qcur", il);
 
-            ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur);
+            ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur, model.layers[il].wk_s, model.layers[il].wk_in_s);
             cb(Kcur, "Kcur", il);
 
-            ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur);
+            ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur, model.layers[il].wv_s, model.layers[il].wv_in_s);
             cb(Vcur, "Vcur", il);
 
             Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, NULL,
@@ -143,7 +143,15 @@ llama_model_olmoe::graph::graph(const llama_model & model, const llm_graph_param
                 LLM_FFN_SILU, false,
                 hparams.expert_weights_scale,
                 LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX,
-                il);
+                il,
+                nullptr,
+                nullptr,
+                model.layers[il].ffn_up_exps_s,
+                model.layers[il].ffn_gate_exps_s,
+                model.layers[il].ffn_down_exps_s,
+                model.layers[il].ffn_up_exps_in_s,
+                model.layers[il].ffn_gate_exps_in_s,
+                model.layers[il].ffn_down_exps_in_s);
         cb(cur, "ffn_moe_out", il);
 
         cur = ggml_add(ctx0, cur, ffn_inp);
@@ -164,7 +172,7 @@ llama_model_olmoe::graph::graph(const llama_model & model, const llm_graph_param
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

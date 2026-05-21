@@ -138,7 +138,15 @@ llama_model_qwen2moe::graph::graph(const llama_model & model, const llm_graph_pa
                     LLM_FFN_SILU, false,
                     hparams.expert_weights_scale,
                     LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX,
-                    il);
+                    il,
+                    nullptr,
+                    nullptr,
+                    model.layers[il].ffn_up_exps_s,
+                    model.layers[il].ffn_gate_exps_s,
+                    model.layers[il].ffn_down_exps_s,
+                    model.layers[il].ffn_up_exps_in_s,
+                    model.layers[il].ffn_gate_exps_in_s,
+                    model.layers[il].ffn_down_exps_in_s);
         cb(moe_out, "ffn_moe_out", il);
 
         // FFN shared expert
@@ -155,7 +163,10 @@ llama_model_qwen2moe::graph::graph(const llama_model & model, const llm_graph_pa
                     model.layers[il].ffn_gate_shexp, NULL, NULL,
                     model.layers[il].ffn_down_shexp, NULL, NULL,
                     NULL,
-                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+                    LLM_FFN_SILU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_shexp_in_s,
+                    model.layers[il].ffn_gate_shexp_in_s,
+                    model.layers[il].ffn_down_shexp_in_s);
             cb(cur_ffn, "ffn_shexp", il);
 
             ggml_tensor * ffn_shexp_out = ggml_mul(ctx0, cur_ffn, cur_gate);
@@ -184,7 +195,7 @@ llama_model_qwen2moe::graph::graph(const llama_model & model, const llm_graph_pa
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

@@ -103,7 +103,10 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
             model.layers[il].ffn_up, NULL, NULL,
             model.layers[il].ffn_gate, NULL, NULL,
             model.layers[il].ffn_down, NULL, NULL,
-            NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
+            NULL, LLM_FFN_SILU, LLM_FFN_PAR, il,
+                model.layers[il].ffn_up_in_s,
+                model.layers[il].ffn_gate_in_s,
+                model.layers[il].ffn_down_in_s);
     };
     auto build_moe_feed_forward = [&model, this](ggml_tensor * cur, int il) -> ggml_tensor * {
         return build_moe_ffn(cur,
@@ -116,7 +119,15 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
                 LLM_FFN_SILU, true,
                 hparams.expert_weights_scale,
                 static_cast<llama_expert_gating_func_type>(hparams.expert_gating_func),
-                il);
+                il,
+                nullptr,
+                nullptr,
+                model.layers[il].ffn_up_exps_s,
+                model.layers[il].ffn_gate_exps_s,
+                model.layers[il].ffn_down_exps_s,
+                model.layers[il].ffn_up_exps_in_s,
+                model.layers[il].ffn_gate_exps_in_s,
+                model.layers[il].ffn_down_exps_in_s);
     };
     auto build_attn_block = [&model, this](ggml_tensor *   cur,
                                            ggml_tensor *   inp_pos,
@@ -262,7 +273,7 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
     cb(cur, "result_output", -1);
 
     res->t_logits = cur;

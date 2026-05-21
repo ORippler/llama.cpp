@@ -146,7 +146,10 @@ llama_model_qwen3moe::graph::graph(const llama_model & model, const llm_graph_pa
                     nullptr, nullptr,
                     model.layers[il].ffn_up_exps_s,
                     model.layers[il].ffn_gate_exps_s,
-                    model.layers[il].ffn_down_exps_s);
+                    model.layers[il].ffn_down_exps_s,
+                    model.layers[il].ffn_up_exps_in_s,
+                    model.layers[il].ffn_gate_exps_in_s,
+                    model.layers[il].ffn_down_exps_in_s);
         cb(moe_out, "ffn_moe_out", il);
         cur = moe_out;
 
@@ -168,7 +171,7 @@ llama_model_qwen3moe::graph::graph(const llama_model & model, const llm_graph_pa
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

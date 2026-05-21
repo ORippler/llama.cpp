@@ -135,7 +135,10 @@ llama_model_qwen3vl::graph::graph(const llama_model & model, const llm_graph_par
                 model.layers[il].ffn_gate, NULL, NULL,
                 model.layers[il].ffn_down, NULL, NULL,
                 NULL,
-                LLM_FFN_SILU, LLM_FFN_PAR, il);
+                LLM_FFN_SILU, LLM_FFN_PAR, il,
+                model.layers[il].ffn_up_in_s,
+                model.layers[il].ffn_gate_in_s,
+                model.layers[il].ffn_down_in_s);
         cb(cur, "ffn_out", il);
 
         cur = ggml_add(ctx0, cur, ffn_inp);
@@ -163,7 +166,7 @@ llama_model_qwen3vl::graph::graph(const llama_model & model, const llm_graph_par
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

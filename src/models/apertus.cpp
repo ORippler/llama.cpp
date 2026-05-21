@@ -125,7 +125,7 @@ llama_model_apertus::graph::graph(const llama_model & model, const llm_graph_par
             cb(cur, "ffn_norm", il);
 
             // Up projection
-            ggml_tensor * up = build_lora_mm(model.layers[il].ffn_up, cur);
+            ggml_tensor * up = build_lora_mm(model.layers[il].ffn_up, cur, model.layers[il].ffn_up_s, model.layers[il].ffn_up_in_s);
             cb(up, "ffn_up", il);
 
             float alpha_n_val = hparams.xielu_alpha_n[il];
@@ -138,7 +138,7 @@ llama_model_apertus::graph::graph(const llama_model & model, const llm_graph_par
             cb(activated, "ffn_xielu", il);
 
             // Down projection
-            cur = build_lora_mm(model.layers[il].ffn_down, activated);
+            cur = build_lora_mm(model.layers[il].ffn_down, activated, model.layers[il].ffn_down_s, model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_down", il);
         }
 
@@ -160,7 +160,7 @@ llama_model_apertus::graph::graph(const llama_model & model, const llm_graph_par
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

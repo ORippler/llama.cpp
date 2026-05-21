@@ -144,7 +144,10 @@ llama_model_modern_bert::graph::graph(const llama_model & model, const llm_graph
                 NULL,                      NULL, NULL,
                 model.layers[il].ffn_down, NULL, NULL,
                 NULL,
-                LLM_FFN_GEGLU, LLM_FFN_SEQ, il);
+                LLM_FFN_GEGLU, LLM_FFN_SEQ, il,
+                model.layers[il].ffn_up_in_s,
+                nullptr,
+                model.layers[il].ffn_down_in_s);
 
         // attentions bypass the intermediate layer
         cur = ggml_add(ctx0, cur, ffn_inp);

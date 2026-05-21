@@ -158,7 +158,14 @@ llama_model_smallthinker::graph<iswa>::graph(const llama_model & model, const ll
                     LLM_FFN_RELU, true,
                     hparams.expert_weights_scale,
                     static_cast<llama_expert_gating_func_type>(hparams.expert_gating_func),
-                    il, probs);
+                    il, probs,
+                    nullptr,
+                    model.layers[il].ffn_up_exps_s,
+                    model.layers[il].ffn_gate_exps_s,
+                    model.layers[il].ffn_down_exps_s,
+                    model.layers[il].ffn_up_exps_in_s,
+                    model.layers[il].ffn_gate_exps_in_s,
+                    model.layers[il].ffn_down_exps_in_s);
 
         cb(ffn_out, "ffn_out", il);
         cur = ffn_out;
@@ -178,7 +185,7 @@ llama_model_smallthinker::graph<iswa>::graph(const llama_model & model, const ll
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
     cb(cur, "result_output", -1);
     res->t_logits = cur;
 

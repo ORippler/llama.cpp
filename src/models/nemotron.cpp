@@ -119,7 +119,10 @@ llama_model_nemotron::graph::graph(const llama_model & model, const llm_graph_pa
                 NULL,                      NULL,                        NULL,
                 model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                 NULL,
-                LLM_FFN_RELU_SQR, LLM_FFN_SEQ, il);
+                LLM_FFN_RELU_SQR, LLM_FFN_SEQ, il,
+                model.layers[il].ffn_up_in_s,
+                nullptr,
+                model.layers[il].ffn_down_in_s);
 
         cur = ggml_add(ctx0, cur, ffn_inp);
         cb(cur, "ffn_out", il);
@@ -140,7 +143,7 @@ llama_model_nemotron::graph::graph(const llama_model & model, const llm_graph_pa
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

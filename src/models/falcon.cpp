@@ -127,7 +127,11 @@ llama_model_falcon::graph::graph(const llama_model & model, const llm_graph_para
                     NULL,                      NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
                     NULL,
-                    LLM_FFN_GELU, LLM_FFN_SEQ, il);
+                    LLM_FFN_GELU, LLM_FFN_SEQ, il,
+                    // !! use the attn norm, not the result
+                    model.layers[il].ffn_up_in_s,
+                    nullptr,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         }
 
@@ -152,7 +156,7 @@ llama_model_falcon::graph::graph(const llama_model & model, const llm_graph_para
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

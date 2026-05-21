@@ -103,7 +103,10 @@ llama_model_jais::graph::graph(const llama_model & model, const llm_graph_params
                     model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
                     model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                     NULL,
-                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+                    LLM_FFN_SILU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         }
 
@@ -123,7 +126,7 @@ llama_model_jais::graph::graph(const llama_model & model, const llm_graph_params
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

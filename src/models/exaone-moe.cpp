@@ -188,7 +188,10 @@ llama_model_exaone_moe::graph::graph(const llama_model & model, const llm_graph_
                     model.layers[il].ffn_up, NULL, NULL,
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL, NULL,
-                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+                    LLM_FFN_SILU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         } else {
             // MoE branch
@@ -202,7 +205,15 @@ llama_model_exaone_moe::graph::graph(const llama_model & model, const llm_graph_
                 LLM_FFN_SILU, hparams.expert_weights_norm,
                 hparams.expert_weights_scale,
                 (llama_expert_gating_func_type) hparams.expert_gating_func,
-                il);
+                il,
+                    nullptr,
+                    nullptr,
+                    model.layers[il].ffn_up_exps_s,
+                    model.layers[il].ffn_gate_exps_s,
+                    model.layers[il].ffn_down_exps_s,
+                    model.layers[il].ffn_up_exps_in_s,
+                    model.layers[il].ffn_gate_exps_in_s,
+                    model.layers[il].ffn_down_exps_in_s);
             cb(moe_out, "ffn_moe_out", il);
 
             // FFN shared expert
@@ -212,7 +223,10 @@ llama_model_exaone_moe::graph::graph(const llama_model & model, const llm_graph_
                         model.layers[il].ffn_up_shexp, NULL, NULL,
                         model.layers[il].ffn_gate_shexp, NULL, NULL,
                         model.layers[il].ffn_down_shexp, NULL, NULL,
-                        NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
+                        NULL, LLM_FFN_SILU, LLM_FFN_PAR, il,
+                            model.layers[il].ffn_up_shexp_in_s,
+                            model.layers[il].ffn_gate_shexp_in_s,
+                            model.layers[il].ffn_down_shexp_in_s);
                 cb(ffn_shexp, "ffn_shexp", il);
 
                 cur = ggml_add(ctx0, moe_out, ffn_shexp);
@@ -237,7 +251,7 @@ llama_model_exaone_moe::graph::graph(const llama_model & model, const llm_graph_
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;
