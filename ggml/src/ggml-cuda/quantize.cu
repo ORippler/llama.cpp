@@ -139,9 +139,8 @@ static __global__ void quantize_mmq_nvfp4(
     uint8_t fp8_code = first_fp8_code;
     float subblock_scale = test_scale;
 
-    const int n_test_offsets = scales ? 1 : 5;
-
     if (scales == nullptr) {
+    const int n_test_offsets = 5;
 #    pragma unroll  // Check +/- 2 to find best code to reduce NVFP4 activation loss unless input scales define the scale.
         for (int i = 1; i < n_test_offsets; i++) {
             const int test_code = first_fp8_code + test_offsets[i];
