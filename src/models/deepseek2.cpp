@@ -228,7 +228,7 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
 
             cur = build_attn(inp_attn_kv,
                         model.layers[il].wo, NULL, model.layers[il].wo_s,
-                        Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+                        Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il, model.layers[il].wo_in_s);
             cb(cur, "attn_out", il);
         }
         else {
@@ -326,7 +326,7 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
                 // note: MLA with the absorption optimization converts into MQA (ie: GQA with 1 group)
                 cur = build_attn(inp_attn_k,
                         model.layers[il].wo, NULL, model.layers[il].wo_s,
-                        Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, kq_scale, il);
+                        Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, kq_scale, il, model.layers[il].wo_in_s);
             } else {
                 ggml_tensor * kv = ggml_mul_mat(ctx0, model.layers[il].wkv_b, kv_cmpr);
                 cb(kv, "kv", il);
@@ -363,7 +363,7 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
                 // note: MLA without the absorption optimization converts into MHA (ie: GQA with full n_head groups)
                 cur = build_attn(inp_attn_kv,
                             model.layers[il].wo, NULL, model.layers[il].wo_s,
-                            Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+                            Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il, model.layers[il].wo_in_s);
             }
         }
         if (il == effective_n_layers - 1 && inp_out_ids) {
@@ -381,7 +381,10 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
                 model.layers[il].ffn_up, NULL, NULL,
                 model.layers[il].ffn_gate, NULL, NULL,
                 model.layers[il].ffn_down, NULL, NULL,
-                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
+                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         } else {
             // MoE branch
@@ -397,7 +400,13 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
                 (llama_expert_gating_func_type) hparams.expert_gating_func,
                 il,
                 nullptr,
-                model.layers[il].ffn_gate_up_exps);
+                model.layers[il].ffn_gate_up_exps,
+                    model.layers[il].ffn_up_exps_s,
+                    model.layers[il].ffn_gate_exps_s,
+                    model.layers[il].ffn_down_exps_s,
+                    model.layers[il].ffn_up_exps_in_s,
+                    model.layers[il].ffn_gate_exps_in_s,
+                    model.layers[il].ffn_down_exps_in_s);
             cb(moe_out, "ffn_moe_out", il);
 
             // FFN shared expert
@@ -407,7 +416,10 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
                         model.layers[il].ffn_up_shexp, NULL, NULL,
                         model.layers[il].ffn_gate_shexp, NULL, NULL,
                         model.layers[il].ffn_down_shexp, NULL, NULL,
-                        NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
+                        NULL, LLM_FFN_SILU, LLM_FFN_PAR, il,
+                            model.layers[il].ffn_up_shexp_in_s,
+                            model.layers[il].ffn_gate_shexp_in_s,
+                            model.layers[il].ffn_down_shexp_in_s);
                 cb(ffn_shexp, "ffn_shexp", il);
 
                 cur = ggml_add(ctx0, moe_out, ffn_shexp);

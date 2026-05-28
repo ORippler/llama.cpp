@@ -209,7 +209,7 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, NULL, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il, model.layers[il].wo_in_s);
         }
         if (il == n_transformer_layers - 1 && inp_out_ids) {
             cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
@@ -230,7 +230,10 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
                     NULL,
-                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+                    LLM_FFN_SILU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         } else {
             // Process routed experts using existing MoE infrastructure
@@ -244,7 +247,15 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
                     LLM_FFN_SILU, hparams.expert_weights_norm,
                     hparams.expert_weights_scale,
                     (llama_expert_gating_func_type) hparams.expert_gating_func,
-                    il);
+                    il,
+                    nullptr,
+                    nullptr,
+                    model.layers[il].ffn_up_exps_s,
+                    model.layers[il].ffn_gate_exps_s,
+                    model.layers[il].ffn_down_exps_s,
+                    model.layers[il].ffn_up_exps_in_s,
+                    model.layers[il].ffn_gate_exps_in_s,
+                    model.layers[il].ffn_down_exps_in_s);
             cb(routed_out, "ffn_moe_out", il);
 
             // Process shared expert on original input
@@ -253,7 +264,10 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
                     model.layers[il].ffn_gate_shexp, NULL, NULL,
                     model.layers[il].ffn_down_shexp, NULL, NULL,
                     NULL,
-                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+                    LLM_FFN_SILU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_shexp_in_s,
+                    model.layers[il].ffn_gate_shexp_in_s,
+                    model.layers[il].ffn_down_shexp_in_s);
             cb(shared_out, "ffn_shexp_out", il);
 
             // Final output: routed_output + shared_output
@@ -275,7 +289,7 @@ llama_model_glm4_moe::graph::graph(const llama_model & model, const llm_graph_pa
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

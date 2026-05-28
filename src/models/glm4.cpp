@@ -138,7 +138,7 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, NULL, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il, model.layers[il].wo_in_s);
         }
         if (il == n_transformer_layers - 1 && inp_out_ids) {
             cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
@@ -163,7 +163,10 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
                     model.layers[il].ffn_up, NULL, NULL,
                     NULL, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
-                    NULL, LLM_FFN_SWIGLU, LLM_FFN_SEQ, il);
+                    NULL, LLM_FFN_SWIGLU, LLM_FFN_SEQ, il,
+                    model.layers[il].ffn_up_in_s,
+                    nullptr,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
 
             // Post-MLP norm
@@ -185,7 +188,7 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
     res->t_embd = cur;
 
     // Output projection
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

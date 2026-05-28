@@ -107,7 +107,7 @@ llama_model_llada_moe::graph::graph(const llama_model & model, const llm_graph_p
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, NULL, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il, model.layers[il].wo_in_s);
         }
         if (il == n_layer - 1 && inp_out_ids) {
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
@@ -132,7 +132,15 @@ llama_model_llada_moe::graph::graph(const llama_model & model, const llm_graph_p
                 LLM_FFN_SILU, false,
                 hparams.expert_weights_scale,
                 LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX,
-                il);
+                il,
+                nullptr,
+                nullptr,
+                model.layers[il].ffn_up_exps_s,
+                model.layers[il].ffn_gate_exps_s,
+                model.layers[il].ffn_down_exps_s,
+                model.layers[il].ffn_up_exps_in_s,
+                model.layers[il].ffn_gate_exps_in_s,
+                model.layers[il].ffn_down_exps_in_s);
         cb(cur, "ffn_moe_out", il);
 
         cur = ggml_add(ctx0, cur, ffn_inp);
@@ -153,7 +161,7 @@ llama_model_llada_moe::graph::graph(const llama_model & model, const llm_graph_p
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

@@ -173,10 +173,10 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
 
             cur = build_attn(inp_attn, model.layers[il].wo,
                     NULL, model.layers[il].wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr,
-                    hparams.f_attention_scale, il);
+                    hparams.f_attention_scale, il, model.layers[il].wo_in_s);
         } else {
             // reuse KV cache of earlier layers
-            ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur);
+            ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s, model.layers[il].wq_in_s);
             cb(Qcur, "Qcur", il);
             Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head, n_tokens);
 
@@ -189,7 +189,8 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, NULL, model.layers[il].wo_s,
-                    Qcur, nullptr, nullptr, nullptr, nullptr, nullptr, hparams.f_attention_scale, il);
+                    Qcur, nullptr, nullptr, nullptr, nullptr, nullptr, hparams.f_attention_scale, il,
+                    model.layers[il].wo_in_s);
         }
         cur = build_norm(cur, model.layers[il].attn_post_norm, NULL, LLM_NORM_RMS, il);
         cb(cur, "attn_post_norm", il);
@@ -206,8 +207,8 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
 
         // feed-forward network
         {
-            ggml_tensor * up_proj   = build_lora_mm(model.layers[il].ffn_up, cur);
-            ggml_tensor * gate_proj = build_lora_mm(model.layers[il].ffn_gate, cur);
+            ggml_tensor * up_proj   = build_lora_mm(model.layers[il].ffn_up, cur, model.layers[il].ffn_up_s, model.layers[il].ffn_up_in_s);
+            ggml_tensor * gate_proj = build_lora_mm(model.layers[il].ffn_gate, cur, model.layers[il].ffn_gate_s, model.layers[il].ffn_gate_in_s);
 
             if (il < n_layer_sparsity) {
                 // apply activation sparsity
@@ -216,7 +217,7 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
             gate_proj = ggml_gelu(ctx0, gate_proj);
 
             cur = ggml_mul(ctx0, up_proj, gate_proj);
-            cur = build_lora_mm(model.layers[il].ffn_down, cur);
+            cur = build_lora_mm(model.layers[il].ffn_down, cur, model.layers[il].ffn_down_s, model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         }
         cur = build_norm(cur, model.layers[il].ffn_post_norm, NULL, LLM_NORM_RMS, -1);
@@ -296,7 +297,7 @@ llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_par
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     {
         // final logit soft-capping

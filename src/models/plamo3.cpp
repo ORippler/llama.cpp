@@ -104,7 +104,7 @@ llama_model_plamo3::graph<iswa>::graph(const llama_model & model, const llm_grap
         cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
         cb(cur, "attn_norm", il);
 
-        ggml_tensor * qkv = build_lora_mm(model.layers[il].wqkv, cur);
+        ggml_tensor * qkv = build_lora_mm(model.layers[il].wqkv, cur, model.layers[il].wqkv_s, model.layers[il].wqkv_in_s);
         cb(cur, "wqkv", il);
 
         const int32_t n_head    = hparams.n_head(il);
@@ -141,7 +141,7 @@ llama_model_plamo3::graph<iswa>::graph(const llama_model & model, const llm_grap
 
         cur = build_attn(inp_attn,
                 model.layers[il].wo, NULL, model.layers[il].wo_s,
-                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, attn_scale, il);
+                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, attn_scale, il, model.layers[il].wo_in_s);
         cb(cur, "attn_out", il);
 
         if (il == n_layer - 1 && inp_out_ids) {
@@ -165,7 +165,10 @@ llama_model_plamo3::graph<iswa>::graph(const llama_model & model, const llm_grap
                 NULL,                      NULL, NULL,
                 model.layers[il].ffn_down, NULL, NULL,
                 NULL,
-                LLM_FFN_SWIGLU, LLM_FFN_SEQ, il);
+                LLM_FFN_SWIGLU, LLM_FFN_SEQ, il,
+                model.layers[il].ffn_up_in_s,
+                nullptr,
+                model.layers[il].ffn_down_in_s);
         cb(cur, "ffn_out", il);
 
         cur = build_norm(cur, model.layers[il].ffn_post_norm, NULL, LLM_NORM_RMS, il);
@@ -186,7 +189,7 @@ llama_model_plamo3::graph<iswa>::graph(const llama_model & model, const llm_grap
     cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
     res->t_logits = cur;
 
     ggml_build_forward_expand(gf, cur);

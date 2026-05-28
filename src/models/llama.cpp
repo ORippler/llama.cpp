@@ -166,7 +166,8 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
             }
             cur = build_attn(inp_attn,
                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il,
+                    model.layers[il].wo_in_s);
             cb(cur, "attn_out", il);
         }
         if (il == n_layer - 1 && inp_out_ids) {
@@ -241,7 +242,7 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
 
     if constexpr (!embed) {
         // lm_head
-        cur = build_lora_mm(model.output, cur, model.output_s);
+        cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
         cb(cur, "result_output", -1);
         res->t_logits = cur;

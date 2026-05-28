@@ -2100,7 +2100,8 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * sinks,
         ggml_tensor * v_mla,
             float     kq_scale,
-            int       il) const {
+            int       il,
+    ggml_tensor * wo_in_s) const {
     GGML_UNUSED(n_tokens);
 
     // these nodes are added to the graph together so that they are not reordered
@@ -2126,7 +2127,7 @@ ggml_tensor * llm_graph_context::build_attn(
     cb(cur, "kqv_out", il);
 
     if (wo) {
-        cur = build_lora_mm(wo, cur, wo_s);
+        cur = build_lora_mm(wo, cur, wo_s, wo_in_s);
     }
 
     if (wo_b) {
@@ -2185,7 +2186,8 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * sinks,
         ggml_tensor * v_mla, // TODO: remove
             float     kq_scale,
-            int       il) const {
+            int       il,
+    ggml_tensor * wo_in_s) const {
     GGML_ASSERT(v_mla == nullptr);
 
     if (inp->self_k_rot) {
@@ -2229,7 +2231,7 @@ ggml_tensor * llm_graph_context::build_attn(
     }
 
     if (wo) {
-        cur = build_lora_mm(wo, cur, wo_s);
+        cur = build_lora_mm(wo, cur, wo_s, wo_in_s);
         if (arch == LLM_ARCH_GLM4 || arch == LLM_ARCH_GLM4_MOE || arch == LLM_ARCH_JAIS2) {
             // GLM4, GLM4_MOE, and JAIS2 seem to have numerical issues with half-precision accumulators
             ggml_mul_mat_set_prec(cur, GGML_PREC_F32);
@@ -2284,7 +2286,8 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * sinks,
         ggml_tensor * v_mla,
             float     kq_scale,
-            int       il) const {
+            int       il,
+    ggml_tensor * wo_in_s) const {
     // these nodes are added to the graph together so that they are not reordered
     // by doing so, the number of splits in the graph is reduced
     // expand k later to enable rope fusion which directly writes into k-v cache
@@ -2311,7 +2314,7 @@ ggml_tensor * llm_graph_context::build_attn(
     cb(cur, "kqv_out", il);
 
     if (wo) {
-        cur = build_lora_mm(wo, cur, wo_s);
+        cur = build_lora_mm(wo, cur, wo_s, wo_in_s);
         if (arch == LLM_ARCH_GLM4 || arch == LLM_ARCH_GLM4_MOE) {
             ggml_mul_mat_set_prec(cur, GGML_PREC_F32);
         }
@@ -2336,7 +2339,8 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * sinks,
         ggml_tensor * v_mla,
             float     kq_scale,
-            int       il) const {
+            int       il,
+    ggml_tensor * wo_in_s) const {
     const bool is_swa = hparams.is_swa(il);
 
     auto * k_rot = is_swa ? inp->self_k_rot_swa : inp->self_k_rot;
@@ -2397,7 +2401,7 @@ ggml_tensor * llm_graph_context::build_attn(
     }
 
     if (wo) {
-        cur = build_lora_mm(wo, cur, wo_s);
+        cur = build_lora_mm(wo, cur, wo_s, wo_in_s);
     }
 
     if (wo_b) {
@@ -2436,7 +2440,8 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * sinks,
         ggml_tensor * v_mla,
             float     kq_scale,
-            int       il) const {
+            int       il,
+    ggml_tensor * wo_in_s) const {
     // these nodes are added to the graph together so that they are not reordered
     // by doing so, the number of splits in the graph is reduced
     ggml_build_forward_expand(gf, q_cur);
@@ -2453,7 +2458,7 @@ ggml_tensor * llm_graph_context::build_attn(
     cb(cur, "kqv_out", il);
 
     if (wo) {
-        cur = build_lora_mm(wo, cur, wo_s);
+        cur = build_lora_mm(wo, cur, wo_s, wo_in_s);
     }
 
     if (wo_b) {

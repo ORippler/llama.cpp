@@ -436,7 +436,8 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
                 ggml_tensor * Vcur = kv_cmpr;
                 cb(Vcur, "Vcur", il);
 
-                cur = build_attn(inp_attn_k, layer.wo, NULL, layer.wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, layer.wv_b, kq_scale_mla, il);
+                cur = build_attn(inp_attn_k, layer.wo, NULL, layer.wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, layer.wv_b, kq_scale_mla, il,
+                                  layer.wo_in_s);
                 cb(cur, "mla_out", il);
             } else { // MLA KV cache disabled. Fall back to MHA KV cache.
                 Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head_k_mla, n_head, n_tokens);
@@ -467,7 +468,8 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
 
                 // Direct softmax attention (with MHA KV cache)
                 // Use build_attn with inp_attn for proper mask handling
-                cur = build_attn(inp_attn_kv, layer.wo, NULL, layer.wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale_mla, il);
+                cur = build_attn(inp_attn_kv, layer.wo, NULL, layer.wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale_mla, il,
+                                  layer.wo_in_s);
                 cb(cur, "mla_out", il);
             }
         }
@@ -492,7 +494,10 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
                 layer.ffn_up, NULL, NULL,
                 layer.ffn_gate, NULL, NULL,
                 layer.ffn_down, NULL, NULL,
-                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
+                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il,
+                    layer.ffn_up_in_s,
+                    layer.ffn_gate_in_s,
+                    layer.ffn_down_in_s);
             cb(cur, "ffn_out", il);
         } else {
             // MoE layer
@@ -508,7 +513,15 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
                 LLM_FFN_SILU, true,
                 hparams.expert_weights_scale,
                 (llama_expert_gating_func_type) hparams.expert_gating_func,
-                il);
+                il,
+                    nullptr,
+                    nullptr,
+                    layer.ffn_up_exps_s,
+                    layer.ffn_gate_exps_s,
+                    layer.ffn_down_exps_s,
+                    layer.ffn_up_exps_in_s,
+                    layer.ffn_gate_exps_in_s,
+                    layer.ffn_down_exps_in_s);
             cb(moe_out, "ffn_moe_out", il);
 
             // Shared expert
@@ -517,7 +530,10 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
                         layer.ffn_up_shexp, NULL, NULL,
                         layer.ffn_gate_shexp, NULL, NULL,
                         layer.ffn_down_shexp, NULL, NULL,
-                        NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
+                        NULL, LLM_FFN_SILU, LLM_FFN_PAR, il,
+                        layer.ffn_up_shexp_in_s,
+                        layer.ffn_gate_shexp_in_s,
+                        layer.ffn_down_shexp_in_s);
                 cb(ffn_shexp, "ffn_shexp", il);
 
                 cur = ggml_add(ctx0, moe_out, ffn_shexp);

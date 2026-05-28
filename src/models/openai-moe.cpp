@@ -110,7 +110,7 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, model.layers[il].attn_sinks, nullptr, 1.0f/sqrtf(float(n_rot)), il);
+                    Qcur, Kcur, Vcur, nullptr, model.layers[il].attn_sinks, nullptr, 1.0f/sqrtf(float(n_rot)), il, model.layers[il].wo_in_s);
 
             cb(cur, "attn_out", il);
         }
@@ -139,7 +139,11 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
                 LLM_FFN_SWIGLU_OAI_MOE, false,
                 hparams.expert_weights_scale,
                 LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT,
-                il);
+                il,
+                model.layers[il].ffn_down_exps_s,
+                model.layers[il].ffn_up_exps_in_s,
+                model.layers[il].ffn_gate_exps_in_s,
+                model.layers[il].ffn_down_exps_in_s);
         cb(cur, "ffn_moe_out", il);
 
         cur = ggml_add(ctx0, cur, ffn_inp);
@@ -160,7 +164,7 @@ llama_model_openai_moe::graph::graph(const llama_model & model, const llm_graph_
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

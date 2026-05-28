@@ -80,7 +80,7 @@ llama_model_eurobert::graph::graph(const llama_model & model, const llm_graph_pa
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, nullptr, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il, model.layers[il].wo_in_s);
             cb(cur, "kqv_out", il);
         }
 
@@ -103,7 +103,10 @@ llama_model_eurobert::graph::graph(const llama_model & model, const llm_graph_pa
                 model.layers[il].ffn_up, NULL, NULL,
                 model.layers[il].ffn_gate, NULL, NULL,
                 model.layers[il].ffn_down, NULL, NULL,
-                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
+                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il,
+                model.layers[il].ffn_up_in_s,
+                model.layers[il].ffn_gate_in_s,
+                model.layers[il].ffn_down_in_s);
         cb(cur, "ffn_out", il);
 
         cur = ggml_add(ctx0, cur, ffn_inp);

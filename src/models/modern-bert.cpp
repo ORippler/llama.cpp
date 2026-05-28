@@ -121,7 +121,7 @@ llama_model_modern_bert::graph::graph(const llama_model & model, const llm_graph
 
         cur = build_attn(inp_attn,
                     model.layers[il].wo, nullptr, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il, model.layers[il].wo_in_s);
         cb(cur, "kqv_out", il);
 
         if (il == n_layer - 1 && inp_out_ids) {
@@ -144,7 +144,10 @@ llama_model_modern_bert::graph::graph(const llama_model & model, const llm_graph
                 NULL,                      NULL, NULL,
                 model.layers[il].ffn_down, NULL, NULL,
                 NULL,
-                LLM_FFN_GEGLU, LLM_FFN_SEQ, il);
+                LLM_FFN_GEGLU, LLM_FFN_SEQ, il,
+                model.layers[il].ffn_up_in_s,
+                nullptr,
+                model.layers[il].ffn_down_in_s);
 
         // attentions bypass the intermediate layer
         cur = ggml_add(ctx0, cur, ffn_inp);

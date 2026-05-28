@@ -128,7 +128,7 @@ llama_model_gemma_embedding::graph::graph(const llama_model & model, const llm_g
             cur =
                 build_attn(inp_attn,
                     model.layers[il].wo, NULL, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f, il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f, il, model.layers[il].wo_in_s);
         }
 
         if (il == n_layer - 1 && inp_out_ids) {
@@ -151,7 +151,10 @@ llama_model_gemma_embedding::graph::graph(const llama_model & model, const llm_g
                 model.layers[il].ffn_up, NULL, NULL,
                 model.layers[il].ffn_gate, NULL, NULL,
                 model.layers[il].ffn_down, NULL, NULL,
-                NULL, LLM_FFN_GELU, LLM_FFN_PAR, il);
+                NULL, LLM_FFN_GELU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         }
 

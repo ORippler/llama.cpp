@@ -150,7 +150,7 @@ llama_model_bert::graph::graph(const llama_model & model, const llm_graph_params
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il);
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il, model.layers[il].wo_in_s);
             cb(cur, "kqv_out", il);
         }
 
@@ -186,7 +186,14 @@ llama_model_bert::graph::graph(const llama_model & model, const llm_graph_params
                     LLM_FFN_GELU, false,
                     hparams.expert_weights_scale,
                     LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX,
-                    il);
+                    il,
+                    nullptr, nullptr,
+                    model.layers[il].ffn_up_exps_s,
+                    nullptr,
+                    model.layers[il].ffn_down_exps_s,
+                    model.layers[il].ffn_up_exps_in_s,
+                    nullptr,
+                    model.layers[il].ffn_down_exps_in_s);
             cb(cur, "ffn_moe_out", il);
         } else if (model.arch == LLM_ARCH_BERT || model.arch == LLM_ARCH_NOMIC_BERT_MOE ||
                    model.arch == LLM_ARCH_JINA_BERT_V3) {
@@ -194,7 +201,10 @@ llama_model_bert::graph::graph(const llama_model & model, const llm_graph_params
                     model.layers[il].ffn_up, model.layers[il].ffn_up_b, NULL,
                     NULL, NULL, NULL,
                     model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL, NULL,
-                    LLM_FFN_GELU, LLM_FFN_SEQ, il);
+                    LLM_FFN_GELU, LLM_FFN_SEQ, il,
+                    model.layers[il].ffn_up_in_s,
+                    nullptr,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         } else if (model.arch == LLM_ARCH_JINA_BERT_V2) {
             const bool up_contains_gate = !model.layers[il].ffn_gate && model.layers[il].ffn_up->ne[1] != hparams.n_ff();
@@ -203,14 +213,20 @@ llama_model_bert::graph::graph(const llama_model & model, const llm_graph_params
                     model.layers[il].ffn_up, model.layers[il].ffn_up_b, NULL,
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL, NULL,
-                    type_op, LLM_FFN_PAR, il);
+                    type_op, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         } else {
             cur = build_ffn(cur,
                 model.layers[il].ffn_up, NULL, NULL,
                 model.layers[il].ffn_gate, NULL, NULL,
                 model.layers[il].ffn_down, NULL, NULL,
-                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
+                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         }
 

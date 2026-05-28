@@ -116,7 +116,7 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
 
             if (model.layers[il].wqkv) {
                 // Fused qkv_proj - Q/K share head_dim_k, V uses head_dim_v
-                ggml_tensor * qkv = build_lora_mm(model.layers[il].wqkv, cur);
+                ggml_tensor * qkv = build_lora_mm(model.layers[il].wqkv, cur, model.layers[il].wqkv_s, model.layers[il].wqkv_in_s);
                 cb(qkv, "wqkv", il);
 
                 const size_t row_k    = ggml_row_size(qkv->type, n_embd_head_k);
@@ -130,13 +130,13 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
                 Vcur = ggml_view_3d(ctx0, qkv, n_embd_head_v, n_head_kv_l, n_tokens, row_v, row_full, v_off);
             } else {
                 // Split path
-                Qcur = build_lora_mm(model.layers[il].wq, cur);
+                Qcur = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s, model.layers[il].wq_in_s);
                 cb(Qcur, "Qcur", il);
 
-                Kcur = build_lora_mm(model.layers[il].wk, cur);
+                Kcur = build_lora_mm(model.layers[il].wk, cur, model.layers[il].wk_s, model.layers[il].wk_in_s);
                 cb(Kcur, "Kcur", il);
 
-                Vcur = build_lora_mm(model.layers[il].wv, cur);
+                Vcur = build_lora_mm(model.layers[il].wv, cur, model.layers[il].wv_s, model.layers[il].wv_in_s);
                 cb(Vcur, "Vcur", il);
 
                 Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head_k, n_head_l,    n_tokens);
@@ -164,7 +164,7 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, NULL, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, sinks, nullptr, 1.0f/sqrtf(float(n_embd_head_k)), il);
+                    Qcur, Kcur, Vcur, nullptr, sinks, nullptr, 1.0f/sqrtf(float(n_embd_head_k)), il, model.layers[il].wo_in_s);
             cb(cur, "attn_out", il);
 
             if (v_scale) {
@@ -194,7 +194,10 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
                     model.layers[il].ffn_gate, model.layers[il].ffn_gate_b, NULL,
                     model.layers[il].ffn_down, model.layers[il].ffn_down_b, NULL,
                     NULL,
-                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+                    LLM_FFN_SILU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         } else {
             // MoE branch
@@ -208,7 +211,15 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
                     LLM_FFN_SILU, true,
                     hparams.expert_weights_scale,
                     LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID,
-                    il);
+                    il,
+                    nullptr,
+                    nullptr,
+                    model.layers[il].ffn_up_exps_s,
+                    model.layers[il].ffn_gate_exps_s,
+                    model.layers[il].ffn_down_exps_s,
+                    model.layers[il].ffn_up_exps_in_s,
+                    model.layers[il].ffn_gate_exps_in_s,
+                    model.layers[il].ffn_down_exps_in_s);
             cb(cur, "ffn_moe_out", il);
         }
 
@@ -231,7 +242,7 @@ llama_model_mimo2::graph::graph(const llama_model & model, const llm_graph_param
     res->t_embd = cur;
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

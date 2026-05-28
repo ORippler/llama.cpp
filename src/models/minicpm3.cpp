@@ -195,7 +195,7 @@ llama_model_minicpm3::graph::graph(const llama_model & model, const llm_graph_pa
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, NULL, model.layers[il].wo_s,
-                    q_states, k_states, v_states, nullptr, nullptr, nullptr, kq_scale, il);
+                    q_states, k_states, v_states, nullptr, nullptr, nullptr, kq_scale, il, model.layers[il].wo_in_s);
         }
         if (il == n_layer - 1 && inp_out_ids) {
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
@@ -221,7 +221,10 @@ llama_model_minicpm3::graph::graph(const llama_model & model, const llm_graph_pa
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
                     NULL,
-                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+                    LLM_FFN_SILU, LLM_FFN_PAR, il,
+                    model.layers[il].ffn_up_in_s,
+                    model.layers[il].ffn_gate_in_s,
+                    model.layers[il].ffn_down_in_s);
             cb(cur, "ffn_out", il);
         }
         // scale the hidden states for residual connection
@@ -251,7 +254,7 @@ llama_model_minicpm3::graph::graph(const llama_model & model, const llm_graph_pa
     cb(cur, "lmhead_scaling", -1);
 
     // lm_head
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;

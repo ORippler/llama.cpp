@@ -77,13 +77,14 @@ llama_model_cogvlm::graph::graph(const llama_model & model, const llm_graph_para
 
     for (int il = 0; il < n_layer; ++il) {
         // get either the text or image weight tensors
-        ggml_tensor *wqkv, *wo, *wo_s;
+        ggml_tensor *wqkv, *wo, *wo_s, *wo_in_s;
         ggml_tensor *ffn_gate, *ffn_down, *ffn_up;
 
         if (is_text) {
             wqkv     = model.layers[il].wqkv;
             wo       = model.layers[il].wo;
             wo_s     = model.layers[il].wo_s;
+            wo_in_s  = model.layers[il].wo_in_s;
             ffn_gate = model.layers[il].ffn_gate;
             ffn_down = model.layers[il].ffn_down;
             ffn_up   = model.layers[il].ffn_up;
@@ -91,6 +92,7 @@ llama_model_cogvlm::graph::graph(const llama_model & model, const llm_graph_para
             wqkv     = model.layers[il].visexp_attn_wqkv;
             wo       = model.layers[il].visexp_attn_wo;
             wo_s     = nullptr;
+            wo_in_s  = nullptr;
             ffn_gate = model.layers[il].visexp_ffn_gate;
             ffn_down = model.layers[il].visexp_ffn_down;
             ffn_up   = model.layers[il].visexp_ffn_up;
@@ -118,7 +120,7 @@ llama_model_cogvlm::graph::graph(const llama_model & model, const llm_graph_para
                 wo, nullptr, wo_s,
                 Qcur, Kcur, Vcur,
                 nullptr, nullptr, nullptr,
-                kq_scale, il);
+                kq_scale, il, wo_in_s);
             cb(cur, "attn_out", il);
         }
 
@@ -150,7 +152,7 @@ llama_model_cogvlm::graph::graph(const llama_model & model, const llm_graph_para
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
 
-    cur = build_lora_mm(model.output, cur, model.output_s);
+    cur = build_lora_mm(model.output, cur, model.output_s, model.output_in_s);
     cb(cur, "result_output", -1);
     res->t_logits = cur;
     ggml_build_forward_expand(gf, cur);
