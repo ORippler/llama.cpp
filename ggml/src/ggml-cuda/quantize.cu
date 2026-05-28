@@ -74,7 +74,8 @@ __device__ __forceinline__ uint8_t compute_e8m0_scale(float amax) {
 
 
 static __global__ void quantize_mmq_nvfp4(
-        const float * __restrict__ x, const int32_t * __restrict__ ids, void * __restrict__ vy,
+        const float * __restrict__ x, const int32_t * __restrict__ ids, const float * __restrict__ scales,
+        const int64_t n_scales, void * __restrict__ vy,
         const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
         const int64_t ne0, const int64_t ne1, const int64_t ne2) {
 #if defined(BLACKWELL_MMA_AVAILABLE)
@@ -100,6 +101,10 @@ static __global__ void quantize_mmq_nvfp4(
 
     const int sub = (i0_base % QK_K) / QK_NVFP4_SUB;
 
+    const int64_t is = n_scales == 1 ? 0 : i1;
+    const float input_scale = scales ? scales[is] : 1.0f;
+    const float input_scale_inv = input_scale > 0.0f ? 1.0f / input_scale : 0.0f;
+
     float vals_raw[QK_NVFP4_SUB];
     float amax_raw = 0.0f;
     const int64_t base_idx = i3 * s03 + i2 * s02 + i01 * s01;
@@ -107,7 +112,7 @@ static __global__ void quantize_mmq_nvfp4(
     for (int k = 0; k < QK_NVFP4_SUB; k++) {
         const int64_t i00 = i0_base + k;
         if (i00 < ne00) {
-            const float v = x[base_idx + i00];
+            const float v = x[base_idx + i00] * input_scale_inv;
             vals_raw[k] = v;
             amax_raw = fmaxf(amax_raw, fabsf(v));
         } else {
@@ -118,32 +123,47 @@ static __global__ void quantize_mmq_nvfp4(
     static constexpr int test_offsets[5] = { 0, -1, 1, -2, 2};
     const int first_fp8_code = (int) ggml_cuda_fp32_to_ue4m3(amax_raw / 6.0f);
 
-    float best_err = FLT_MAX;
-    uint8_t fp8_code = 0;
-    float subblock_scale = 0.0f;
-
-#pragma unroll // Check +/- 2 to find best code to reduce NVFP4 activation loss. Negligible overhead on Blackwell.
-    for (int i = 0; i < 5; i++) {
-        const int test_code = first_fp8_code + test_offsets[i];
-        if (test_code < 0 || test_code > 0x7e) {
-            continue;
-        }
-        const uint8_t code = (uint8_t) test_code;
-        const float test_scale = ggml_cuda_ue4m3_to_fp32(code);
-        const float test_inv_scale = test_scale > 0.0f ? 0.5f / test_scale : 0.0f;
-        float cur_err = 0.0f;
+    const uint8_t code = (uint8_t) first_fp8_code;
+    const float test_scale = ggml_cuda_ue4m3_to_fp32(code);
+    const float test_inv_scale = test_scale > 0.0f ? 0.5f / test_scale : 0.0f;
+    float cur_err = 0.0f;
 #pragma unroll
-        for (int k = 0; k < QK_NVFP4_SUB; ++k) {
-            const float v = vals_raw[k];
-            const uint8_t q = ggml_cuda_float_to_fp4_e2m1(v, test_inv_scale);
-            const float err_diff = fabsf(v) - fabsf(kvalues_mxfp4[q & 0x7]) * test_scale;
-            cur_err = fmaf(err_diff, err_diff, cur_err);
-        }
+    for (int k = 0; k < QK_NVFP4_SUB; ++k) {
+        const float v = vals_raw[k];
+        const uint8_t q = ggml_cuda_float_to_fp4_e2m1(v, test_inv_scale);
+        const float err_diff = fabsf(v) - fabsf(kvalues_mxfp4[q & 0x7]) * test_scale;
+        cur_err = fmaf(err_diff, err_diff, cur_err);
+    }
 
-        if (cur_err < best_err) {
-            best_err = cur_err;
-            fp8_code = test_code;
-            subblock_scale = test_scale;
+    float best_err = cur_err;
+    uint8_t fp8_code = first_fp8_code;
+    float subblock_scale = test_scale;
+
+    if (scales == nullptr) {
+    const int n_test_offsets = 5;
+#    pragma unroll  // Check +/- 2 to find best code to reduce NVFP4 activation loss unless input scales define the scale.
+        for (int i = 1; i < n_test_offsets; i++) {
+            const int test_code = first_fp8_code + test_offsets[i];
+            if (test_code < 0 || test_code > 0x7e) {
+                continue;
+            }
+            const uint8_t code           = (uint8_t) test_code;
+            const float   test_scale     = ggml_cuda_ue4m3_to_fp32(code);
+            const float   test_inv_scale = test_scale > 0.0f ? 0.5f / test_scale : 0.0f;
+            float         cur_err        = 0.0f;
+#    pragma unroll
+            for (int k = 0; k < QK_NVFP4_SUB; ++k) {
+                const float   v        = vals_raw[k];
+                const uint8_t q        = ggml_cuda_float_to_fp4_e2m1(v, test_inv_scale);
+                const float   err_diff = fabsf(v) - fabsf(kvalues_mxfp4[q & 0x7]) * test_scale;
+                cur_err                = fmaf(err_diff, err_diff, cur_err);
+            }
+
+            if (cur_err < best_err) {
+                best_err       = cur_err;
+                fp8_code       = test_code;
+                subblock_scale = test_scale;
+            }
         }
     }
 
@@ -418,11 +438,12 @@ void quantize_mmq_q8_1_cuda(
 }
 
 void quantize_mmq_fp4_cuda(
-        const float * x, const int32_t * ids, void * vy, const ggml_type type_src0,
+        const float * x, const int32_t * ids, const float * scales, const int64_t n_scales, void * vy, const ggml_type type_src0,
         const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
         const int64_t ne0, const int64_t ne1, const int64_t ne2, const int64_t ne3, cudaStream_t stream) {
     GGML_ASSERT(type_src0 == GGML_TYPE_MXFP4 || type_src0 == GGML_TYPE_NVFP4);
     GGML_ASSERT(ne0 > 0);
+    GGML_ASSERT(scales == nullptr || n_scales == 1 || n_scales == ne1);
 
     if (type_src0 == GGML_TYPE_NVFP4) {
         GGML_ASSERT(ne00 % QK_NVFP4 == 0);
@@ -431,7 +452,7 @@ void quantize_mmq_fp4_cuda(
         const dim3 block_size(nvfp4_block_size, 1, 1);
         const dim3 num_blocks(ne1, block_num_y, ne2 * ne3);
         quantize_mmq_nvfp4<<<num_blocks, block_size, 0, stream>>>(
-            x, ids, vy, ne00, s01, s02, s03, ne0, ne1, ne2);
+            x, ids, scales, n_scales, vy, ne00, s01, s02, s03, ne0, ne1, ne2);
     } else {
         GGML_ASSERT(ne0 % (2 * QK_MXFP4) == 0);
 
