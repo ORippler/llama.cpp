@@ -4,8 +4,10 @@
 #include "ggml-impl.h"
 #include "ggml-cuda.h"
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 
@@ -1423,6 +1425,10 @@ struct ggml_backend_cuda_context {
     size_t cublas_workspace_sizes[GGML_CUDA_MAX_DEVICES] = {0};
 
     int curr_stream_no = 0;
+    uint64_t cublas_debug_capture_ordinal = 0;
+    const void * cublas_debug_graph_key = nullptr;
+    bool cublas_debug_capture_had_graph = false;
+    bool cublas_debug_capture_had_instance = false;
 
 #ifdef USE_CUDA_GRAPH
     // Map from first_node_ptr to cuda_graph - allows multiple graphs per context
@@ -1504,12 +1510,34 @@ struct ggml_backend_cuda_context {
             CUBLAS_CHECK(cublasSetMathMode(cublas_handles[device][curr_stream_no], CUBLAS_TF32_TENSOR_OP_MATH));
             CUBLAS_CHECK(cublasSetStream(cublas_handles[device][curr_stream_no], stream()));
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && CUDART_VERSION >= 11000
+            bool use_default_workspace = false;
             if (cublas_workspace_sizes[device] == 0) {
                 const int cc = ggml_cuda_info().devices[device].cc;
                 cublas_workspace_sizes[device] = (cc >= GGML_CUDA_CC_HOPPER) ? 32 * 1024 * 1024 : 4 * 1024 * 1024;
+
+                const char * workspace_size_env = getenv("GGML_CUDA_CUBLAS_WORKSPACE_SIZE");
+                if (workspace_size_env != nullptr) {
+                    if (strcmp(workspace_size_env, "default") == 0) {
+                        cublas_workspace_sizes[device] = 0;
+                        use_default_workspace = true;
+                    } else {
+                        char * end = nullptr;
+                        errno = 0;
+                        const unsigned long long workspace_size = strtoull(workspace_size_env, &end, 10);
+                        if (errno == 0 && end != workspace_size_env && *end == '\0' && workspace_size <= SIZE_MAX) {
+                            cublas_workspace_sizes[device] = workspace_size;
+                        } else {
+                            GGML_LOG_WARN("%s: ignoring invalid GGML_CUDA_CUBLAS_WORKSPACE_SIZE=%s\n", __func__, workspace_size_env);
+                        }
+                    }
+                }
             }
-            CUDA_CHECK(cudaMalloc(&cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device]));
-            CUBLAS_CHECK(cublasSetWorkspace(cublas_handles[device][curr_stream_no], cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device]));
+            if (cublas_workspace_sizes[device] != 0) {
+                CUDA_CHECK(cudaMalloc(&cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device]));
+            }
+            if (!use_default_workspace) {
+                CUBLAS_CHECK(cublasSetWorkspace(cublas_handles[device][curr_stream_no], cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device]));
+            }
 #endif
         }
         return cublas_handles[device][curr_stream_no];

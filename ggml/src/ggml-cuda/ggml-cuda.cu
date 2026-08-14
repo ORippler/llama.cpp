@@ -1405,6 +1405,126 @@ struct batched_mul_mat_traits<GGML_TYPE_F16> {
     static inline auto convert_nc(ggml_type src_type) { return ggml_get_to_fp16_nc_cuda(src_type); }
 };
 
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+static const char * ggml_cuda_capture_status_name(cudaStreamCaptureStatus status) {
+    switch (status) {
+        case cudaStreamCaptureStatusNone:
+            return "none";
+        case cudaStreamCaptureStatusActive:
+            return "active";
+        case cudaStreamCaptureStatusInvalidated:
+            return "invalidated";
+    }
+    return "unknown";
+}
+
+static void ggml_cuda_log_sgemm_failure(
+        ggml_backend_cuda_context & ctx,
+        cublasHandle_t handle,
+        cudaStream_t expected_stream,
+        cublasStatus_t cublas_status,
+        bool capture_before_queried,
+        cudaError_t capture_query_status_before,
+        cudaStreamCaptureStatus capture_status_before,
+        unsigned long long capture_id_before,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        const ggml_tensor * dst,
+        int64_t m,
+        int64_t n,
+        int64_t k,
+        int64_t lda,
+        int64_t ldb,
+        int64_t ldc,
+        const void * a,
+        const void * b,
+        const void * c) {
+    const cudaError_t pending_cuda_status = cudaPeekAtLastError();
+
+    int current_device = -1;
+    const cudaError_t device_status = cudaGetDevice(&current_device);
+
+    cublasHandle_t current_handle = ctx.cublas_handles[ctx.device][ctx.curr_stream_no];
+    cudaStream_t handle_stream = nullptr;
+    const cublasStatus_t stream_status = cublasGetStream(handle, &handle_stream);
+
+    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+    unsigned long long capture_id = 0;
+    const cudaError_t capture_query_status = cudaStreamGetCaptureInfo(expected_stream, &capture_status, &capture_id);
+
+    int driver_version = 0;
+    int runtime_version = 0;
+    int cublas_version = 0;
+    cublasMath_t math_mode = CUBLAS_DEFAULT_MATH;
+    const cudaError_t driver_version_status = cudaDriverGetVersion(&driver_version);
+    const cudaError_t runtime_version_status = cudaRuntimeGetVersion(&runtime_version);
+    const cublasStatus_t cublas_version_status = cublasGetVersion(handle, &cublas_version);
+    const cublasStatus_t math_mode_status = cublasGetMathMode(handle, &math_mode);
+
+    GGML_LOG_ERROR("cuBLAS SGEMM failure diagnostics:\n");
+    GGML_LOG_ERROR("  status=%d (%s), current device=%d, device query=%d (%s)\n",
+            (int) cublas_status, cublas_get_error_str(cublas_status),
+            current_device, (int) device_status, cudaGetErrorString(device_status));
+    GGML_LOG_ERROR("  context device=%d, stream number=%d, handle=%p, current handle=%p\n",
+            ctx.device, ctx.curr_stream_no, (void *) handle, (void *) current_handle);
+    GGML_LOG_ERROR("  expected stream=%p, handle stream=%p, stream query=%d (%s)\n",
+            (void *) expected_stream, (void *) handle_stream,
+            (int) stream_status, cublas_get_error_str(stream_status));
+    if (capture_before_queried) {
+        GGML_LOG_ERROR("  capture before SGEMM: query=%d (%s), status=%d (%s), id=%llu\n",
+                (int) capture_query_status_before, cudaGetErrorString(capture_query_status_before),
+                (int) capture_status_before, ggml_cuda_capture_status_name(capture_status_before), capture_id_before);
+    } else {
+        GGML_LOG_ERROR("  capture before SGEMM: not queried; set GGML_CUDA_CUBLAS_DEBUG=1\n");
+    }
+    GGML_LOG_ERROR("  capture after failure: query=%d (%s), status=%d (%s), id=%llu\n",
+            (int) capture_query_status, cudaGetErrorString(capture_query_status),
+            (int) capture_status, ggml_cuda_capture_status_name(capture_status), capture_id);
+    GGML_LOG_ERROR("  capture ordinal=%" PRIu64 ", graph key=%p, prior graph=%d, prior instance=%d\n",
+            ctx.cublas_debug_capture_ordinal, ctx.cublas_debug_graph_key,
+            (int) ctx.cublas_debug_capture_had_graph, (int) ctx.cublas_debug_capture_had_instance);
+    GGML_LOG_ERROR("  pending CUDA status=%d (%s)\n",
+            (int) pending_cuda_status, cudaGetErrorString(pending_cuda_status));
+    GGML_LOG_ERROR("  driver=%d (query=%d), runtime=%d (query=%d), cuBLAS=%d (query=%d)\n",
+            driver_version, (int) driver_version_status,
+            runtime_version, (int) runtime_version_status,
+            cublas_version, (int) cublas_version_status);
+    GGML_LOG_ERROR("  math mode=%d (query=%d), CUBLAS_WORKSPACE_CONFIG=%s\n",
+            (int) math_mode, (int) math_mode_status,
+            getenv("CUBLAS_WORKSPACE_CONFIG") != nullptr ? getenv("CUBLAS_WORKSPACE_CONFIG") : "<unset>");
+    GGML_LOG_ERROR("  GGML_CUDA_CUBLAS_WORKSPACE_SIZE=%s\n",
+            getenv("GGML_CUDA_CUBLAS_WORKSPACE_SIZE") != nullptr ? getenv("GGML_CUDA_CUBLAS_WORKSPACE_SIZE") : "<unset>");
+    GGML_LOG_ERROR("  workspace=%p, workspace size=%zu\n",
+            ctx.cublas_workspaces[ctx.device][ctx.curr_stream_no],
+            ctx.cublas_workspace_sizes[ctx.device]);
+    GGML_LOG_ERROR("  m=%" PRId64 ", n=%" PRId64 ", k=%" PRId64 ", lda=%" PRId64 ", ldb=%" PRId64 ", ldc=%" PRId64 "\n",
+            m, n, k, lda, ldb, ldc);
+    GGML_LOG_ERROR("  A=%p, B=%p, C=%p\n", a, b, c);
+    GGML_LOG_ERROR("  src0=%s (%s), src1=%s (%s), dst=%s (%s)\n",
+            src0->name, ggml_type_name(src0->type),
+            src1->name, ggml_type_name(src1->type),
+            dst->name, ggml_type_name(dst->type));
+
+    const auto log_pointer = [](const char * name, const void * ptr) {
+        cudaPointerAttributes attributes = {};
+        const cudaError_t status = cudaPointerGetAttributes(&attributes, ptr);
+        if (status == cudaSuccess) {
+            GGML_LOG_ERROR("  %s attributes: type=%d, device=%d, device pointer=%p, host pointer=%p\n",
+                    name, (int) attributes.type, attributes.device, attributes.devicePointer, attributes.hostPointer);
+        } else {
+            GGML_LOG_ERROR("  %s attributes: query=%d (%s)\n", name, (int) status, cudaGetErrorString(status));
+        }
+    };
+
+    log_pointer("A", a);
+    log_pointer("B", b);
+    log_pointer("C", c);
+    if (ctx.cublas_workspaces[ctx.device][ctx.curr_stream_no] != nullptr) {
+        log_pointer("workspace", ctx.cublas_workspaces[ctx.device][ctx.curr_stream_no]);
+    }
+}
+#endif
+
 template<ggml_type compute_type>
 static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
     using traits = batched_mul_mat_traits<compute_type>;
@@ -1541,12 +1661,32 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
     // However, for some old NVIDIA and AMD GPUs the strided/Ex GEMM is much slower,
     //     probably because the internal kernel selection logic is suboptimal.
     if (compute_type == GGML_TYPE_F32 && ne12 == 1 && ne13 == 1) {
-        CUBLAS_CHECK(
-            cublasSgemm(cublas_h, CUBLAS_OP_T, CUBLAS_OP_N,
-                    ne01, ne11, ne10,
-                    (const float *) alpha, (const float *) src0_ptr, s01,
-                                           (const float *) src1_ptr, s11,
-                    (const float *) beta,  (float       *)  dst_ptr, ne0));
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+        static const bool cublas_debug = [] {
+            const char * env = getenv("GGML_CUDA_CUBLAS_DEBUG");
+            return env != nullptr && atoi(env) != 0;
+        }();
+        cudaStreamCaptureStatus capture_status_before = cudaStreamCaptureStatusNone;
+        unsigned long long capture_id_before = 0;
+        cudaError_t capture_query_status_before = cudaSuccess;
+        if (cublas_debug) {
+            capture_query_status_before = cudaStreamGetCaptureInfo(main_stream, &capture_status_before, &capture_id_before);
+        }
+#endif
+        const cublasStatus_t status = cublasSgemm(cublas_h, CUBLAS_OP_T, CUBLAS_OP_N,
+                ne01, ne11, ne10,
+                (const float *) alpha, (const float *) src0_ptr, s01,
+                                       (const float *) src1_ptr, s11,
+                (const float *) beta,  (float       *)  dst_ptr, ne0);
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            ggml_cuda_log_sgemm_failure(ctx, cublas_h, main_stream, status,
+                    cublas_debug, capture_query_status_before, capture_status_before, capture_id_before,
+                    src0, src1, dst,
+                    ne01, ne11, ne10, s01, s11, ne0, src0_ptr, src1_ptr, dst_ptr);
+        }
+#endif
+        CUBLAS_CHECK(status);
     } else if (ne12 == 1 && ne13 == 1) {
         CUBLAS_CHECK(
             cublasGemmEx(cublas_h, CUBLAS_OP_T, CUBLAS_OP_N,
@@ -4279,6 +4419,12 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 #endif // USE_CUDA_GRAPH
 
     if (use_cuda_graph && cuda_graph_update_required) {
+#ifdef USE_CUDA_GRAPH
+        cuda_ctx->cublas_debug_capture_ordinal++;
+        cuda_ctx->cublas_debug_graph_key = graph_key;
+        cuda_ctx->cublas_debug_capture_had_graph = graph->graph != nullptr;
+        cuda_ctx->cublas_debug_capture_had_instance = graph->instance != nullptr;
+#endif
         // Start CUDA graph capture
         {
             std::lock_guard<std::mutex> lock(ggml_cuda_lock);
