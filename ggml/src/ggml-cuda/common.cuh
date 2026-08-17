@@ -1429,6 +1429,13 @@ struct ggml_backend_cuda_context {
     const void * cublas_debug_graph_key = nullptr;
     bool cublas_debug_capture_had_graph = false;
     bool cublas_debug_capture_had_instance = false;
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    cudaError_t cublas_debug_memory_query_before = cudaSuccess;
+    size_t cublas_debug_memory_free_before = 0;
+    size_t cublas_debug_memory_total_before = 0;
+    size_t cublas_debug_memory_free_baseline = 0;
+    bool cublas_debug_memory_baseline_set = false;
+#endif
 
 #ifdef USE_CUDA_GRAPH
     // Map from first_node_ptr to cuda_graph - allows multiple graphs per context
@@ -1537,6 +1544,16 @@ struct ggml_backend_cuda_context {
             }
             if (!use_default_workspace) {
                 CUBLAS_CHECK(cublasSetWorkspace(cublas_handles[device][curr_stream_no], cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device]));
+            }
+
+            const char * cublas_debug_env = getenv("GGML_CUDA_CUBLAS_DEBUG");
+            if (cublas_debug_env != nullptr && atoi(cublas_debug_env) != 0) {
+                size_t memory_free = 0;
+                size_t memory_total = 0;
+                const cudaError_t status = cudaMemGetInfo(&memory_free, &memory_total);
+                GGML_LOG_INFO("cuBLAS graph memory after handle setup: device=%d, stream=%d, handle=%p, query=%d (%s), free=%zu, total=%zu\n",
+                        device, curr_stream_no, (void *) cublas_handles[device][curr_stream_no],
+                        (int) status, cudaGetErrorString(status), memory_free, memory_total);
             }
 #endif
         }
@@ -1701,4 +1718,3 @@ static __inline__ void ggml_cuda_kernel_launch(Kernel kernel, const ggml_cuda_ke
     kernel<<<launch_params.block_nums, launch_params.block_dims, launch_params.shmem, launch_params.stream>>>(std::forward<Args>(args)... );
     CUDA_CHECK(cudaGetLastError());
 }
-

@@ -1406,6 +1406,53 @@ struct batched_mul_mat_traits<GGML_TYPE_F16> {
 };
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+static bool ggml_cuda_cublas_debug_enabled() {
+    static const bool enabled = [] {
+        const char * env = getenv("GGML_CUDA_CUBLAS_DEBUG");
+        return env != nullptr && atoi(env) != 0;
+    }();
+    return enabled;
+}
+
+static int64_t ggml_cuda_memory_delta(size_t current, size_t reference) {
+    return current >= reference ? (int64_t) (current - reference) : -(int64_t) (reference - current);
+}
+
+static void ggml_cuda_cublas_debug_memory_before_capture(ggml_backend_cuda_context & ctx) {
+    ctx.cublas_debug_memory_query_before = cudaMemGetInfo(
+            &ctx.cublas_debug_memory_free_before,
+            &ctx.cublas_debug_memory_total_before);
+    if (ctx.cublas_debug_memory_query_before == cudaSuccess && !ctx.cublas_debug_memory_baseline_set) {
+        ctx.cublas_debug_memory_free_baseline = ctx.cublas_debug_memory_free_before;
+        ctx.cublas_debug_memory_baseline_set = true;
+    }
+
+    GGML_LOG_INFO("cuBLAS graph memory before capture: ordinal=%" PRIu64 ", device=%d, stream=%d, graph key=%p, query=%d (%s), free=%zu, total=%zu\n",
+            ctx.cublas_debug_capture_ordinal, ctx.device, ctx.curr_stream_no, ctx.cublas_debug_graph_key,
+            (int) ctx.cublas_debug_memory_query_before, cudaGetErrorString(ctx.cublas_debug_memory_query_before),
+            ctx.cublas_debug_memory_free_before, ctx.cublas_debug_memory_total_before);
+}
+
+static void ggml_cuda_cublas_debug_memory_after_capture(ggml_backend_cuda_context & ctx) {
+    size_t memory_free = 0;
+    size_t memory_total = 0;
+    const cudaError_t status = cudaMemGetInfo(&memory_free, &memory_total);
+
+    if (status == cudaSuccess && ctx.cublas_debug_memory_query_before == cudaSuccess) {
+        const int64_t capture_delta = ggml_cuda_memory_delta(memory_free, ctx.cublas_debug_memory_free_before);
+        const int64_t baseline_delta = ctx.cublas_debug_memory_baseline_set ?
+                ggml_cuda_memory_delta(memory_free, ctx.cublas_debug_memory_free_baseline) : 0;
+        GGML_LOG_INFO("cuBLAS graph memory after capture: ordinal=%" PRIu64 ", device=%d, stream=%d, graph key=%p, query=0 (no error), free=%zu, total=%zu, free delta=%" PRId64 ", baseline delta=%" PRId64 "\n",
+                ctx.cublas_debug_capture_ordinal, ctx.device, ctx.curr_stream_no, ctx.cublas_debug_graph_key,
+                memory_free, memory_total, capture_delta, baseline_delta);
+    } else {
+        GGML_LOG_INFO("cuBLAS graph memory after capture: ordinal=%" PRIu64 ", device=%d, stream=%d, graph key=%p, query=%d (%s), free=%zu, total=%zu, before query=%d (%s)\n",
+                ctx.cublas_debug_capture_ordinal, ctx.device, ctx.curr_stream_no, ctx.cublas_debug_graph_key,
+                (int) status, cudaGetErrorString(status), memory_free, memory_total,
+                (int) ctx.cublas_debug_memory_query_before, cudaGetErrorString(ctx.cublas_debug_memory_query_before));
+    }
+}
+
 static const char * ggml_cuda_capture_status_name(cudaStreamCaptureStatus status) {
     switch (status) {
         case cudaStreamCaptureStatusNone:
@@ -1461,6 +1508,10 @@ static void ggml_cuda_log_sgemm_failure(
     const cublasStatus_t cublas_version_status = cublasGetVersion(handle, &cublas_version);
     const cublasStatus_t math_mode_status = cublasGetMathMode(handle, &math_mode);
 
+    size_t memory_free = 0;
+    size_t memory_total = 0;
+    const cudaError_t memory_status = cudaMemGetInfo(&memory_free, &memory_total);
+
     GGML_LOG_ERROR("cuBLAS SGEMM failure diagnostics:\n");
     GGML_LOG_ERROR("  status=%d (%s), current device=%d, device query=%d (%s)\n",
             (int) cublas_status, cublas_get_error_str(cublas_status),
@@ -1497,6 +1548,24 @@ static void ggml_cuda_log_sgemm_failure(
     GGML_LOG_ERROR("  workspace=%p, workspace size=%zu\n",
             ctx.cublas_workspaces[ctx.device][ctx.curr_stream_no],
             ctx.cublas_workspace_sizes[ctx.device]);
+    const bool memory_before_sampled = capture_before_queried && capture_status_before == cudaStreamCaptureStatusActive;
+    if (memory_before_sampled) {
+        GGML_LOG_ERROR("  memory before capture: query=%d (%s), free=%zu, total=%zu\n",
+                (int) ctx.cublas_debug_memory_query_before, cudaGetErrorString(ctx.cublas_debug_memory_query_before),
+                ctx.cublas_debug_memory_free_before, ctx.cublas_debug_memory_total_before);
+    } else {
+        GGML_LOG_ERROR("  memory before capture: not sampled\n");
+    }
+    if (memory_status == cudaSuccess && memory_before_sampled && ctx.cublas_debug_memory_query_before == cudaSuccess) {
+        const int64_t capture_delta = ggml_cuda_memory_delta(memory_free, ctx.cublas_debug_memory_free_before);
+        const int64_t baseline_delta = ctx.cublas_debug_memory_baseline_set ?
+                ggml_cuda_memory_delta(memory_free, ctx.cublas_debug_memory_free_baseline) : 0;
+        GGML_LOG_ERROR("  memory after failure: query=0 (no error), free=%zu, total=%zu, free delta=%" PRId64 ", baseline delta=%" PRId64 "\n",
+                memory_free, memory_total, capture_delta, baseline_delta);
+    } else {
+        GGML_LOG_ERROR("  memory after failure: query=%d (%s), free=%zu, total=%zu\n",
+                (int) memory_status, cudaGetErrorString(memory_status), memory_free, memory_total);
+    }
     GGML_LOG_ERROR("  m=%" PRId64 ", n=%" PRId64 ", k=%" PRId64 ", lda=%" PRId64 ", ldb=%" PRId64 ", ldc=%" PRId64 "\n",
             m, n, k, lda, ldb, ldc);
     GGML_LOG_ERROR("  A=%p, B=%p, C=%p\n", a, b, c);
@@ -1662,10 +1731,7 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
     //     probably because the internal kernel selection logic is suboptimal.
     if (compute_type == GGML_TYPE_F32 && ne12 == 1 && ne13 == 1) {
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
-        static const bool cublas_debug = [] {
-            const char * env = getenv("GGML_CUDA_CUBLAS_DEBUG");
-            return env != nullptr && atoi(env) != 0;
-        }();
+        const bool cublas_debug = ggml_cuda_cublas_debug_enabled();
         cudaStreamCaptureStatus capture_status_before = cudaStreamCaptureStatusNone;
         unsigned long long capture_id_before = 0;
         cudaError_t capture_query_status_before = cudaSuccess;
@@ -4329,6 +4395,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
             }
 
             CUDA_CHECK(cudaStreamEndCapture(cuda_ctx->stream(), &graph->graph));
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+            if (ggml_cuda_cublas_debug_enabled()) {
+                ggml_cuda_cublas_debug_memory_after_capture(*cuda_ctx);
+            }
+#endif
             graph_evaluated_or_captured = true; // CUDA graph has been captured
 
             std::lock_guard<std::mutex> lock(ggml_cuda_lock);
@@ -4424,6 +4495,11 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
         cuda_ctx->cublas_debug_graph_key = graph_key;
         cuda_ctx->cublas_debug_capture_had_graph = graph->graph != nullptr;
         cuda_ctx->cublas_debug_capture_had_instance = graph->instance != nullptr;
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+        if (ggml_cuda_cublas_debug_enabled()) {
+            ggml_cuda_cublas_debug_memory_before_capture(*cuda_ctx);
+        }
+#endif
 #endif
         // Start CUDA graph capture
         {
