@@ -87,6 +87,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
@@ -104,6 +105,66 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
     GGML_LOG_ERROR("  %s\n", stmt);
     // abort with GGML_ABORT to get a stack trace
     GGML_ABORT(GGML_CUDA_NAME " error");
+}
+
+bool ggml_cuda_kernel_diagnostics_enabled() {
+    static const bool enabled = []() {
+        const char * env = getenv("GGML_CUDA_KERNEL_DIAGNOSTICS");
+        return env != nullptr && std::atoi(env) != 0;
+    }();
+
+    return enabled;
+}
+
+void ggml_cuda_kernel_launch_check(cudaError_t err, const ggml_cuda_kernel_launch_info & info) {
+    if (!ggml_cuda_kernel_diagnostics_enabled()) {
+        return;
+    }
+
+    struct stream_key {
+        int          device;
+        cudaStream_t stream;
+
+        bool operator==(const stream_key & other) const {
+            return device == other.device && stream == other.stream;
+        }
+    };
+
+    struct stream_key_hash {
+        size_t operator()(const stream_key & key) const {
+            return std::hash<int>()(key.device) ^ (std::hash<void *>()((void *) key.stream) << 1);
+        }
+    };
+
+    static std::mutex lock;
+    static std::unordered_map<stream_key, ggml_cuda_kernel_launch_info, stream_key_hash> last_launches;
+
+    int device = -1;
+    (void) cudaGetDevice(&device);
+
+    const stream_key key = { device, info.stream };
+    std::lock_guard<std::mutex> guard(lock);
+
+    if (err == cudaSuccess) {
+        last_launches[key] = info;
+        return;
+    }
+
+    GGML_LOG_ERROR("  CUDA kernel diagnostics: launch reporting error: %s, addr=0x%zx, grid=(%u,%u,%u), block=(%u,%u,%u), shmem=%zu, stream=%p\n",
+            info.name, (size_t) info.kernel,
+            info.block_nums.x, info.block_nums.y, info.block_nums.z,
+            info.block_dims.x, info.block_dims.y, info.block_dims.z,
+            info.shmem, (void *) info.stream);
+
+    const auto it = last_launches.find(key);
+    if (it != last_launches.end()) {
+        const ggml_cuda_kernel_launch_info & previous = it->second;
+        GGML_LOG_ERROR("  CUDA kernel diagnostics: previous successful wrapper launch: %s, addr=0x%zx, grid=(%u,%u,%u), block=(%u,%u,%u), shmem=%zu, stream=%p\n",
+                previous.name, (size_t) previous.kernel,
+                previous.block_nums.x, previous.block_nums.y, previous.block_nums.z,
+                previous.block_dims.x, previous.block_dims.y, previous.block_dims.z,
+                previous.shmem, (void *) previous.stream);
+    }
 }
 
 // map a (possibly virtual) device id to the physical CUDA device that backs it

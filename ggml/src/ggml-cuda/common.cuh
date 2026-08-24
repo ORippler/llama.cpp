@@ -180,6 +180,18 @@ static int ggml_cuda_highest_compiled_arch(const int arch) {
 [[noreturn]]
 void ggml_cuda_error(const char * stmt, const char * func, const char * file, int line, const char * msg);
 
+struct ggml_cuda_kernel_launch_info {
+    const char * name;
+    uintptr_t    kernel;
+    dim3         block_nums;
+    dim3         block_dims;
+    size_t       shmem;
+    cudaStream_t stream;
+};
+
+void ggml_cuda_kernel_launch_check(cudaError_t err, const ggml_cuda_kernel_launch_info & info);
+bool ggml_cuda_kernel_diagnostics_enabled();
+
 #define CUDA_CHECK_GEN(err, success, error_fn)                                      \
      do {                                                                           \
         auto err_ = (err);                                                          \
@@ -1647,7 +1659,16 @@ static bool ggml_cuda_kernel_can_use_pdl(const void * kernel) {
 # endif // defined(GGML_CUDA_USE_PDL) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER
 
 template<typename Kernel, typename... Args>
-static __inline__ void ggml_cuda_kernel_launch(Kernel kernel, const ggml_cuda_kernel_launch_params & launch_params, Args&&... args) {
+static __inline__ void ggml_cuda_kernel_launch_impl(const char * kernel_name, Kernel kernel, const ggml_cuda_kernel_launch_params & launch_params, Args&&... args) {
+    const ggml_cuda_kernel_launch_info info = {
+        kernel_name,
+        reinterpret_cast<uintptr_t>(kernel),
+        launch_params.block_nums,
+        launch_params.block_dims,
+        launch_params.shmem,
+        launch_params.stream,
+    };
+
 #if defined(GGML_CUDA_USE_PDL)
 
     static const bool env_pdl_enabled = []() {
@@ -1658,12 +1679,17 @@ static __inline__ void ggml_cuda_kernel_launch(Kernel kernel, const ggml_cuda_ke
     if (env_pdl_enabled && ggml_cuda_kernel_can_use_pdl(reinterpret_cast<const void *>(kernel))) {
         auto pdl_cfg = ggml_cuda_pdl_config(launch_params);
 
-        CUDA_CHECK(cudaLaunchKernelEx(&pdl_cfg.cfg, kernel, std::forward<Args>(args)... ));
+        const cudaError_t err = cudaLaunchKernelEx(&pdl_cfg.cfg, kernel, std::forward<Args>(args)... );
+        ggml_cuda_kernel_launch_check(err, info);
+        CUDA_CHECK(err);
         return;
     }
 #endif //defined(GGML_CUDA_USE_PDL)
 
     kernel<<<launch_params.block_nums, launch_params.block_dims, launch_params.shmem, launch_params.stream>>>(std::forward<Args>(args)... );
-    CUDA_CHECK(cudaGetLastError());
+    const cudaError_t err = cudaGetLastError();
+    ggml_cuda_kernel_launch_check(err, info);
+    CUDA_CHECK(err);
 }
 
+#define ggml_cuda_kernel_launch(...) ggml_cuda_kernel_launch_impl(#__VA_ARGS__, __VA_ARGS__)

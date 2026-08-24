@@ -107,6 +107,20 @@ static void set_rows_cuda_quant(
         k_set_rows_quant<idx_t, block_type, qk, quantize_func><<<grid_size, block_size, 0, stream>>>(
             src0_d, src1_d, dst_d, ne_total, ne10, ne11, ne12, ne13, s01, s02, s03, s10, s11, s12, s1, s2, s3, ne00_fd,
             ne01_fd, ne02_fd, ne11_fd, ne12_fd);
+
+        if (ggml_cuda_kernel_diagnostics_enabled()) {
+            const ggml_cuda_kernel_launch_info info = {
+                "k_set_rows_quant",
+                reinterpret_cast<uintptr_t>(k_set_rows_quant<idx_t, block_type, qk, quantize_func>),
+                grid_size,
+                block_size,
+                0,
+                stream,
+            };
+            const cudaError_t err = cudaGetLastError();
+            ggml_cuda_kernel_launch_check(err, info);
+            CUDA_CHECK(err);
+        }
     }
 }
 
