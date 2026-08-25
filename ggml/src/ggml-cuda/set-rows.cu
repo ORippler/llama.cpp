@@ -109,17 +109,16 @@ static void set_rows_cuda_quant(
             ne01_fd, ne02_fd, ne11_fd, ne12_fd);
 
         if (ggml_cuda_kernel_diagnostics_enabled()) {
-            const ggml_cuda_kernel_launch_info info = {
-                "k_set_rows_quant",
-                reinterpret_cast<uintptr_t>(k_set_rows_quant<idx_t, block_type, qk, quantize_func>),
-                grid_size,
-                block_size,
-                0,
-                stream,
-            };
-            const cudaError_t err = cudaGetLastError();
-            ggml_cuda_kernel_launch_check(err, info);
-            CUDA_CHECK(err);
+            const ggml_cuda_kernel_launch_info info = ggml_cuda_kernel_launch_info_make(
+                "k_set_rows_quant", reinterpret_cast<uintptr_t>(k_set_rows_quant<idx_t, block_type, qk, quantize_func>),
+                grid_size, block_size, 0, stream);
+            const cudaError_t launch_err = cudaGetLastError();
+            cudaError_t sync_err = cudaSuccess;
+            if (launch_err == cudaSuccess) {
+                sync_err = ggml_cuda_kernel_diagnostics_synchronize(stream);
+            }
+            ggml_cuda_kernel_launch_check(launch_err, sync_err, info);
+            CUDA_CHECK(launch_err != cudaSuccess ? launch_err : sync_err);
         }
     }
 }

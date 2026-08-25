@@ -252,6 +252,19 @@ static void dequantize_block_cuda(const void * vx, dst_t * y,
     const dim3 num_blocks((ne00 + 2*CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / (2*CUDA_DEQUANTIZE_BLOCK_SIZE), (int)std::min(ne01, (int64_t)65535), (int)std::min(ne0203, (int64_t)65535));
     dequantize_block<qk, qr, dequantize_kernel><<<num_blocks, CUDA_DEQUANTIZE_BLOCK_SIZE, 0, stream>>>
         (vx, y, ne00, ne01, ne0203, ne02_fdv, s01, s02, s03);
+
+    if (ggml_cuda_kernel_diagnostics_enabled()) {
+        const ggml_cuda_kernel_launch_info info = ggml_cuda_kernel_launch_info_make(
+            "dequantize_block", reinterpret_cast<uintptr_t>(dequantize_block<qk, qr, dequantize_kernel, dst_t>),
+            num_blocks, dim3(CUDA_DEQUANTIZE_BLOCK_SIZE), 0, stream);
+        const cudaError_t launch_err = cudaGetLastError();
+        cudaError_t sync_err = cudaSuccess;
+        if (launch_err == cudaSuccess) {
+            sync_err = ggml_cuda_kernel_diagnostics_synchronize(stream);
+        }
+        ggml_cuda_kernel_launch_check(launch_err, sync_err, info);
+        CUDA_CHECK(launch_err != cudaSuccess ? launch_err : sync_err);
+    }
 }
 
 template <int qk, int qr, dequantize_kernel_t dequantize_kernel, typename dst_t>
@@ -261,12 +274,25 @@ static void dequantize_block_cont_cuda(const void * __restrict__ vx, dst_t * __r
 
 static void dequantize_block_q8_0_f16_cuda(const void * __restrict__ vx, half * __restrict__ y, const int64_t k, cudaStream_t stream) {
     const int num_blocks = (k + CUDA_Q8_0_NE_ALIGN - 1) / CUDA_Q8_0_NE_ALIGN;
-    if (k % CUDA_Q8_0_NE_ALIGN == 0) {
-        const bool need_check = false;
-        dequantize_block_q8_0_f16<need_check><<<num_blocks, WARP_SIZE, 0, stream>>>(vx, y, k);
+    const bool need_check = k % CUDA_Q8_0_NE_ALIGN != 0;
+    if (!need_check) {
+        dequantize_block_q8_0_f16<false><<<num_blocks, WARP_SIZE, 0, stream>>>(vx, y, k);
     } else {
-        const bool need_check = true;
-        dequantize_block_q8_0_f16<need_check><<<num_blocks, WARP_SIZE, 0, stream>>>(vx, y, k);
+        dequantize_block_q8_0_f16<true><<<num_blocks, WARP_SIZE, 0, stream>>>(vx, y, k);
+    }
+
+    if (ggml_cuda_kernel_diagnostics_enabled()) {
+        const ggml_cuda_kernel_launch_info info = ggml_cuda_kernel_launch_info_make(
+            need_check ? "dequantize_block_q8_0_f16<true>" : "dequantize_block_q8_0_f16<false>",
+            need_check ? reinterpret_cast<uintptr_t>(dequantize_block_q8_0_f16<true>) : reinterpret_cast<uintptr_t>(dequantize_block_q8_0_f16<false>),
+            dim3(num_blocks), dim3(WARP_SIZE), 0, stream);
+        const cudaError_t launch_err = cudaGetLastError();
+        cudaError_t sync_err = cudaSuccess;
+        if (launch_err == cudaSuccess) {
+            sync_err = ggml_cuda_kernel_diagnostics_synchronize(stream);
+        }
+        ggml_cuda_kernel_launch_check(launch_err, sync_err, info);
+        CUDA_CHECK(launch_err != cudaSuccess ? launch_err : sync_err);
     }
 }
 

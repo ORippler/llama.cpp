@@ -187,10 +187,19 @@ struct ggml_cuda_kernel_launch_info {
     dim3         block_dims;
     size_t       shmem;
     cudaStream_t stream;
+    uint64_t     sequence;
+    uintptr_t    thread;
+    int64_t      start_us;
 };
 
-void ggml_cuda_kernel_launch_check(cudaError_t err, const ggml_cuda_kernel_launch_info & info);
+ggml_cuda_kernel_launch_info ggml_cuda_kernel_launch_info_make(
+        const char * name, uintptr_t kernel, dim3 block_nums, dim3 block_dims, size_t shmem, cudaStream_t stream);
+void ggml_cuda_kernel_launch_check(
+        cudaError_t launch_err, cudaError_t sync_err, const ggml_cuda_kernel_launch_info & info);
 bool ggml_cuda_kernel_diagnostics_enabled();
+bool ggml_cuda_kernel_diagnostics_device_sync_enabled();
+cudaError_t ggml_cuda_kernel_diagnostics_synchronize(cudaStream_t stream);
+std::mutex & ggml_cuda_kernel_diagnostics_mutex();
 
 #define CUDA_CHECK_GEN(err, success, error_fn)                                      \
      do {                                                                           \
@@ -1660,14 +1669,9 @@ static bool ggml_cuda_kernel_can_use_pdl(const void * kernel) {
 
 template<typename Kernel, typename... Args>
 static __inline__ void ggml_cuda_kernel_launch_impl(const char * kernel_name, Kernel kernel, const ggml_cuda_kernel_launch_params & launch_params, Args&&... args) {
-    const ggml_cuda_kernel_launch_info info = {
-        kernel_name,
-        reinterpret_cast<uintptr_t>(kernel),
-        launch_params.block_nums,
-        launch_params.block_dims,
-        launch_params.shmem,
-        launch_params.stream,
-    };
+    const ggml_cuda_kernel_launch_info info = ggml_cuda_kernel_launch_info_make(
+        kernel_name, reinterpret_cast<uintptr_t>(kernel), launch_params.block_nums, launch_params.block_dims,
+        launch_params.shmem, launch_params.stream);
 
 #if defined(GGML_CUDA_USE_PDL)
 
@@ -1679,17 +1683,25 @@ static __inline__ void ggml_cuda_kernel_launch_impl(const char * kernel_name, Ke
     if (env_pdl_enabled && ggml_cuda_kernel_can_use_pdl(reinterpret_cast<const void *>(kernel))) {
         auto pdl_cfg = ggml_cuda_pdl_config(launch_params);
 
-        const cudaError_t err = cudaLaunchKernelEx(&pdl_cfg.cfg, kernel, std::forward<Args>(args)... );
-        ggml_cuda_kernel_launch_check(err, info);
-        CUDA_CHECK(err);
+        const cudaError_t launch_err = cudaLaunchKernelEx(&pdl_cfg.cfg, kernel, std::forward<Args>(args)... );
+        cudaError_t sync_err = cudaSuccess;
+        if (launch_err == cudaSuccess && ggml_cuda_kernel_diagnostics_enabled()) {
+            sync_err = ggml_cuda_kernel_diagnostics_synchronize(launch_params.stream);
+        }
+        ggml_cuda_kernel_launch_check(launch_err, sync_err, info);
+        CUDA_CHECK(launch_err != cudaSuccess ? launch_err : sync_err);
         return;
     }
 #endif //defined(GGML_CUDA_USE_PDL)
 
     kernel<<<launch_params.block_nums, launch_params.block_dims, launch_params.shmem, launch_params.stream>>>(std::forward<Args>(args)... );
-    const cudaError_t err = cudaGetLastError();
-    ggml_cuda_kernel_launch_check(err, info);
-    CUDA_CHECK(err);
+    const cudaError_t launch_err = cudaGetLastError();
+    cudaError_t sync_err = cudaSuccess;
+    if (launch_err == cudaSuccess && ggml_cuda_kernel_diagnostics_enabled()) {
+        sync_err = ggml_cuda_kernel_diagnostics_synchronize(launch_params.stream);
+    }
+    ggml_cuda_kernel_launch_check(launch_err, sync_err, info);
+    CUDA_CHECK(launch_err != cudaSuccess ? launch_err : sync_err);
 }
 
 #define ggml_cuda_kernel_launch(...) ggml_cuda_kernel_launch_impl(#__VA_ARGS__, __VA_ARGS__)

@@ -200,6 +200,7 @@ if (CUDAToolkit_FOUND)
         list(APPEND CUDA_FLAGS -lineinfo)
         add_compile_definitions(GGML_CUDA_DEBUG)
     endif()
+    list(APPEND CUDA_FLAGS -lineinfo)
 
     if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "12.8")
         # Options are:

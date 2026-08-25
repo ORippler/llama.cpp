@@ -2476,6 +2476,64 @@ struct test_set_rows : public test_case {
     }
 };
 
+// GGML_OP_SET_ROWS + GGML_OP_CPY
+struct test_set_rows_q8_roundtrip : public test_case {
+    const int64_t ne0;
+    const int64_t n_rows;
+    const int64_t n_heads;
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "SET_ROWS_Q8_ROUNDTRIP";
+    }
+
+    std::string vars() override {
+        return VARS_TO_STR3(ne0, n_rows, n_heads);
+    }
+
+    bool run_whole_graph() override { return true; }
+
+    test_set_rows_q8_roundtrip(int64_t ne0 = 256, int64_t n_rows = 64, int64_t n_heads = 4)
+        : ne0(ne0), n_rows(n_rows), n_heads(n_heads) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * cache = ggml_new_tensor_3d(ctx, GGML_TYPE_Q8_0, ne0, n_rows, n_heads);
+        ggml_set_name(cache, "cache");
+
+        ggml_tensor * src = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, ne0, n_rows, n_heads);
+        ggml_set_name(src, "src");
+
+        ggml_tensor * row_idxs = ggml_new_tensor_3d(ctx, GGML_TYPE_I32, n_rows, 1, 1);
+        ggml_set_name(row_idxs, "row_idxs");
+
+        ggml_tensor * quantized = ggml_set_rows(ctx, cache, src, row_idxs);
+        ggml_set_name(quantized, "quantized");
+
+        ggml_tensor * dequantized = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, ne0, n_rows, n_heads);
+        ggml_tensor * out = ggml_cpy(ctx, quantized, dequantized);
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->op != GGML_OP_NONE) {
+                continue;
+            }
+            if (strcmp(t->name, "row_idxs") == 0) {
+                init_set_rows_row_ids(t, n_rows);
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+
+    double max_nmse_err() override {
+        return 5e-6;
+    }
+};
+
 // GGML_OP_ROPE + GGML_OP_VIEW + GGML_OP_SET_ROWS
 struct test_rope_set_rows : public test_case {
     const ggml_type type;
@@ -7188,6 +7246,89 @@ struct test_flash_attn_ext : public test_case {
     }
 };
 
+// GGML_OP_SET_ROWS + GGML_OP_FLASH_ATTN_EXT
+struct test_set_rows_flash_attn_ext : public test_case {
+    const int64_t hs;
+    const int64_t n_head_kv;
+    const int64_t n_head;
+    const int64_t n_seqs;
+    const int64_t kv;
+    const int64_t nb;
+    const int64_t n_update;
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "SET_ROWS_FLASH_ATTN_EXT";
+    }
+
+    std::string vars() override {
+        return VARS_TO_STR7(hs, n_head_kv, n_head, n_seqs, kv, nb, n_update);
+    }
+
+    bool run_whole_graph() override { return true; }
+
+    test_set_rows_flash_attn_ext(
+            int64_t hs = 256, int64_t n_head_kv = 4, int64_t n_head = 24,
+            int64_t n_seqs = 2, int64_t kv = 512, int64_t nb = 64, int64_t n_update = 64)
+        : hs(hs), n_head_kv(n_head_kv), n_head(n_head), n_seqs(n_seqs), kv(kv), nb(nb), n_update(n_update) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        auto build_cache_view = [&](const char * name) {
+            ggml_tensor * backing = ggml_new_tensor_4d(ctx, GGML_TYPE_Q8_0, hs, 2*kv, n_head_kv, n_seqs);
+            ggml_format_name(backing, "%s_backing", name);
+            ggml_tensor * cache = ggml_view_4d(ctx, backing, hs, kv, n_head_kv, n_seqs, backing->nb[1], backing->nb[2], backing->nb[3], 0);
+            ggml_set_name(cache, name);
+            return cache;
+        };
+
+        ggml_tensor * k_cache = build_cache_view("k_cache");
+        ggml_tensor * v_cache = build_cache_view("v_cache");
+
+        ggml_tensor * k_src = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hs, n_update, n_head_kv, n_seqs);
+        ggml_set_name(k_src, "k_src");
+        ggml_tensor * v_src = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hs, n_update, n_head_kv, n_seqs);
+        ggml_set_name(v_src, "v_src");
+
+        ggml_tensor * row_idxs = ggml_new_tensor_3d(ctx, GGML_TYPE_I32, n_update, 1, n_seqs);
+        ggml_set_name(row_idxs, "row_idxs");
+
+        ggml_tensor * k = ggml_set_rows(ctx, k_cache, k_src, row_idxs);
+        ggml_set_name(k, "k");
+        ggml_tensor * v = ggml_set_rows(ctx, v_cache, v_src, row_idxs);
+        ggml_set_name(v, "v");
+
+        ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hs, nb, n_head, n_seqs);
+        ggml_set_name(q, "q");
+        ggml_tensor * mask = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, nb, 1, n_seqs);
+        ggml_set_name(mask, "mask");
+
+        ggml_tensor * out = ggml_flash_attn_ext(ctx, q, k, v, mask, 1.0f/sqrtf(hs), 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->op != GGML_OP_NONE) {
+                continue;
+            }
+            if (strcmp(t->name, "row_idxs") == 0) {
+                init_set_rows_row_ids(t, kv);
+            } else if (strcmp(t->name, "mask") == 0) {
+                init_tensor_kq_mask(t);
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+
+    double max_nmse_err() override {
+        return 5e-4;
+    }
+};
+
 // GGML_OP_CROSS_ENTROPY_LOSS
 struct test_cross_entropy_loss : public test_case {
     const ggml_type type;
@@ -8445,6 +8586,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_I32, { 1, 8, 1, 3 }, { 1, 1 }, 2, false));
     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_I64, { 1, 8, 1, 3 }, { 1, 1 }, 2, true));
     test_cases.emplace_back(new test_set_rows(GGML_TYPE_F16, GGML_TYPE_F16, GGML_TYPE_I32, { 1, 8, 1, 3 }, { 1, 1 }, 2, true));
+    test_cases.emplace_back(new test_set_rows_q8_roundtrip());
 
     for (int mode : { GGML_ROPE_TYPE_NORMAL, GGML_ROPE_TYPE_NEOX, GGML_ROPE_TYPE_MROPE, GGML_ROPE_TYPE_VISION }) {
         for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
@@ -9931,6 +10073,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_flash_attn_ext(128, 64, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q2_0, GGML_TYPE_Q4_0));
     test_cases.emplace_back(new test_flash_attn_ext(64, 128, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q2_0));
     test_cases.emplace_back(new test_flash_attn_ext(128, 64, 4, {1, 1}, 64, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q2_0, GGML_TYPE_F16));
+    test_cases.emplace_back(new test_set_rows_flash_attn_ext());
 
     // large-KV F16 cases (Qwen3.6-27B geometry and a llama-class control): the upstream matrix
     // stops at kv=1024, blind to long-context FA bugs (e.g. the oneDNN SDPA ordering race on BMG).
@@ -10265,6 +10408,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         }
     }
 
+    // Qwen3.8-27B long-context prefill MMQ shapes, https://github.com/ggml-org/llama.cpp/issues/27102
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K, GGML_TYPE_F32, 17408, 512, 5120, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K, GGML_TYPE_F32,  6144, 512, 5120, {1, 1}, {1, 1}));
+
     // qwen3-30b-a3b
     for (int bs : {1, 4, 8, 32, 64, 128, 256, 512}) {
         for (ggml_type type_a : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0, GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_IQ2_XS}) {
@@ -10316,6 +10463,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 8, {8, 1}, 7680, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q4_0));
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 8, {8, 1}, 7680,   1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 8, {8, 1}, 7680, 512, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+
+    // Qwen3.8-27B long-context prefill, https://github.com/ggml-org/llama.cpp/issues/27102
+    test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 252416, 2048, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
 
     for (int kv : { 4096, 8192, 16384, }) {
         for (int hs : { 64, 128, }) {

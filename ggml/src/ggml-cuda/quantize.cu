@@ -583,7 +583,29 @@ void quantize_mmq_q8_1_cuda(
     const int64_t block_num_y = (ne0 + 4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ);
     const dim3 num_blocks(ne1, block_num_y, ne2*ne3);
     const dim3 block_size(CUDA_QUANTIZE_BLOCK_SIZE_MMQ, 1, 1);
-    switch (mmq_get_q8_1_ds_layout(type_src0)) {
+    const mmq_q8_1_ds_layout ds_layout = mmq_get_q8_1_ds_layout(type_src0);
+    const char * kernel_name = nullptr;
+    uintptr_t kernel = 0;
+    switch (ds_layout) {
+        case MMQ_Q8_1_DS_LAYOUT_D4:
+            kernel_name = "quantize_mmq_q8_1<D4>";
+            kernel = reinterpret_cast<uintptr_t>(quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D4, false>);
+            break;
+        case MMQ_Q8_1_DS_LAYOUT_DS4:
+            kernel_name = "quantize_mmq_q8_1<DS4>";
+            kernel = reinterpret_cast<uintptr_t>(quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_DS4, false>);
+            break;
+        case MMQ_Q8_1_DS_LAYOUT_D2S6:
+            kernel_name = "quantize_mmq_q8_1<D2S6>";
+            kernel = reinterpret_cast<uintptr_t>(quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D2S6, false>);
+            break;
+        default:
+            GGML_ABORT("fatal error");
+            break;
+    }
+    const ggml_cuda_kernel_launch_info info = ggml_cuda_kernel_launch_info_make(
+        kernel_name, kernel, num_blocks, block_size, 0, stream);
+    switch (ds_layout) {
         case MMQ_Q8_1_DS_LAYOUT_D4:
             quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D4, false>
                 <<<num_blocks, block_size, 0, stream>>>(x, ids, vy, ne00, s01, s02, s03, ne0, ne1, ne2, /*n_expert_used=*/0);
@@ -600,6 +622,19 @@ void quantize_mmq_q8_1_cuda(
             GGML_ABORT("fatal error");
             break;
     }
+    if (ggml_cuda_kernel_diagnostics_enabled()) {
+        const cudaError_t launch_err = cudaGetLastError();
+        const cudaError_t sync_err = launch_err == cudaSuccess ? ggml_cuda_kernel_diagnostics_synchronize(stream) : cudaSuccess;
+        ggml_cuda_kernel_launch_check(launch_err, sync_err, info);
+        const cudaError_t err = launch_err != cudaSuccess ? launch_err : sync_err;
+        if (err != cudaSuccess) {
+            GGML_LOG_ERROR("  MMQ quantize: type_src0=%s, x=%p, ids=%p, y=%p, ne=[%lld,%lld,%lld,%lld], padded_ne0=%lld, stride=[%lld,%lld,%lld], stream=%p\n",
+                    ggml_type_name(type_src0), (const void *) x, (const void *) ids, vy,
+                    (long long) ne00, (long long) ne1, (long long) ne2, (long long) ne3, (long long) ne0,
+                    (long long) s01, (long long) s02, (long long) s03, (void *) stream);
+        }
+        CUDA_CHECK(err);
+    }
 }
 
 // scatter=true reuses the quant kernel: grid over tokens, ids = inverse map (token slot -> compact row)
@@ -613,7 +648,29 @@ void quantize_scatter_mmq_q8_1_cuda(
     const int64_t block_num_y = (ne0 + 4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ);
     const dim3 num_blocks(n_tokens, block_num_y, 1);
     const dim3 block_size(CUDA_QUANTIZE_BLOCK_SIZE_MMQ, 1, 1);
-    switch (mmq_get_q8_1_ds_layout(type_src0)) {
+    const mmq_q8_1_ds_layout ds_layout = mmq_get_q8_1_ds_layout(type_src0);
+    const char * kernel_name = nullptr;
+    uintptr_t kernel = 0;
+    switch (ds_layout) {
+        case MMQ_Q8_1_DS_LAYOUT_D4:
+            kernel_name = "quantize_scatter_mmq_q8_1<D4>";
+            kernel = reinterpret_cast<uintptr_t>(quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D4, true>);
+            break;
+        case MMQ_Q8_1_DS_LAYOUT_DS4:
+            kernel_name = "quantize_scatter_mmq_q8_1<DS4>";
+            kernel = reinterpret_cast<uintptr_t>(quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_DS4, true>);
+            break;
+        case MMQ_Q8_1_DS_LAYOUT_D2S6:
+            kernel_name = "quantize_scatter_mmq_q8_1<D2S6>";
+            kernel = reinterpret_cast<uintptr_t>(quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D2S6, true>);
+            break;
+        default:
+            GGML_ABORT("fatal error");
+            break;
+    }
+    const ggml_cuda_kernel_launch_info info = ggml_cuda_kernel_launch_info_make(
+        kernel_name, kernel, num_blocks, block_size, 0, stream);
+    switch (ds_layout) {
         case MMQ_Q8_1_DS_LAYOUT_D4:
             quantize_mmq_q8_1<MMQ_Q8_1_DS_LAYOUT_D4, true><<<num_blocks, block_size, 0, stream>>>(
                 x, ids_src1_inv, vy, ne00, /*s01=*/0, /*s02=*/stride_token, /*s03=*/0, ne0, /*ne1=*/(int) nrows_dst, /*ne2=*/1, n_expert_used);
@@ -629,6 +686,19 @@ void quantize_scatter_mmq_q8_1_cuda(
         default:
             GGML_ABORT("fatal error");
             break;
+    }
+    if (ggml_cuda_kernel_diagnostics_enabled()) {
+        const cudaError_t launch_err = cudaGetLastError();
+        const cudaError_t sync_err = launch_err == cudaSuccess ? ggml_cuda_kernel_diagnostics_synchronize(stream) : cudaSuccess;
+        ggml_cuda_kernel_launch_check(launch_err, sync_err, info);
+        const cudaError_t err = launch_err != cudaSuccess ? launch_err : sync_err;
+        if (err != cudaSuccess) {
+            GGML_LOG_ERROR("  MMQ quantize scatter: type_src0=%s, x=%p, ids=%p, y=%p, ne00=%lld, n_tokens=%lld, nrows_dst=%lld, padded_ne0=%lld, stride_token=%lld, n_expert_used=%d, stream=%p\n",
+                    ggml_type_name(type_src0), (const void *) x, (const void *) ids_src1_inv, vy,
+                    (long long) ne00, (long long) n_tokens, (long long) nrows_dst, (long long) ne0,
+                    (long long) stride_token, n_expert_used, (void *) stream);
+        }
+        CUDA_CHECK(err);
     }
 }
 

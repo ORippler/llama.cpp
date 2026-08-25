@@ -110,13 +110,63 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
 bool ggml_cuda_kernel_diagnostics_enabled() {
     static const bool enabled = []() {
         const char * env = getenv("GGML_CUDA_KERNEL_DIAGNOSTICS");
-        return env != nullptr && std::atoi(env) != 0;
+        const bool result = env != nullptr && std::atoi(env) != 0;
+        if (result) {
+            const char * launch_blocking = getenv("CUDA_LAUNCH_BLOCKING");
+            const char * pdl = getenv("GGML_CUDA_PDL");
+            const char * device_sync = getenv("GGML_CUDA_KERNEL_DIAGNOSTICS_DEVICE_SYNC");
+            GGML_LOG_INFO("CUDA kernel diagnostics enabled: CUDA_LAUNCH_BLOCKING=%s, GGML_CUDA_PDL=%s, device_sync=%s\n",
+                    launch_blocking != nullptr ? launch_blocking : "<unset>", pdl != nullptr ? pdl : "<unset>",
+                    device_sync != nullptr && std::atoi(device_sync) != 0 ? "1" : "0");
+        }
+        return result;
     }();
 
     return enabled;
 }
 
-void ggml_cuda_kernel_launch_check(cudaError_t err, const ggml_cuda_kernel_launch_info & info) {
+bool ggml_cuda_kernel_diagnostics_device_sync_enabled() {
+    static const bool enabled = []() {
+        const char * env = getenv("GGML_CUDA_KERNEL_DIAGNOSTICS_DEVICE_SYNC");
+        return env != nullptr && std::atoi(env) != 0;
+    }();
+
+    return ggml_cuda_kernel_diagnostics_enabled() && enabled;
+}
+
+cudaError_t ggml_cuda_kernel_diagnostics_synchronize(cudaStream_t stream) {
+    return ggml_cuda_kernel_diagnostics_device_sync_enabled() ? cudaDeviceSynchronize() : cudaStreamSynchronize(stream);
+}
+
+std::mutex & ggml_cuda_kernel_diagnostics_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+ggml_cuda_kernel_launch_info ggml_cuda_kernel_launch_info_make(
+        const char * name, uintptr_t kernel, dim3 block_nums, dim3 block_dims, size_t shmem, cudaStream_t stream) {
+    static std::atomic<uint64_t> sequence { 0 };
+    static thread_local int thread_marker;
+
+    if (!ggml_cuda_kernel_diagnostics_enabled()) {
+        return { name, kernel, block_nums, block_dims, shmem, stream, 0, 0, 0 };
+    }
+
+    return {
+        name,
+        kernel,
+        block_nums,
+        block_dims,
+        shmem,
+        stream,
+        sequence.fetch_add(1, std::memory_order_relaxed) + 1,
+        reinterpret_cast<uintptr_t>(&thread_marker),
+        ggml_time_us(),
+    };
+}
+
+void ggml_cuda_kernel_launch_check(
+        cudaError_t launch_err, cudaError_t sync_err, const ggml_cuda_kernel_launch_info & info) {
     if (!ggml_cuda_kernel_diagnostics_enabled()) {
         return;
     }
@@ -138,6 +188,7 @@ void ggml_cuda_kernel_launch_check(cudaError_t err, const ggml_cuda_kernel_launc
 
     static std::mutex lock;
     static std::unordered_map<stream_key, ggml_cuda_kernel_launch_info, stream_key_hash> last_launches;
+    static ggml_cuda_kernel_launch_info last_launch = {};
 
     int device = -1;
     (void) cudaGetDevice(&device);
@@ -145,12 +196,18 @@ void ggml_cuda_kernel_launch_check(cudaError_t err, const ggml_cuda_kernel_launc
     const stream_key key = { device, info.stream };
     std::lock_guard<std::mutex> guard(lock);
 
-    if (err == cudaSuccess) {
+    if (launch_err == cudaSuccess && sync_err == cudaSuccess) {
         last_launches[key] = info;
+        last_launch = info;
         return;
     }
 
-    GGML_LOG_ERROR("  CUDA kernel diagnostics: launch reporting error: %s, addr=0x%zx, grid=(%u,%u,%u), block=(%u,%u,%u), shmem=%zu, stream=%p\n",
+    const char * phase = launch_err != cudaSuccess ? "launch-check" : "synchronize";
+    const cudaError_t err = launch_err != cudaSuccess ? launch_err : sync_err;
+    GGML_LOG_ERROR("  CUDA kernel diagnostics: %s error: %s, sequence=%llu, thread=0x%zx, elapsed_us=%lld\n",
+            phase, cudaGetErrorString(err), (unsigned long long) info.sequence, (size_t) info.thread,
+            (long long) (ggml_time_us() - info.start_us));
+    GGML_LOG_ERROR("  CUDA kernel diagnostics: failing launch: %s, addr=0x%zx, grid=(%u,%u,%u), block=(%u,%u,%u), shmem=%zu, stream=%p\n",
             info.name, (size_t) info.kernel,
             info.block_nums.x, info.block_nums.y, info.block_nums.z,
             info.block_dims.x, info.block_dims.y, info.block_dims.z,
@@ -159,11 +216,18 @@ void ggml_cuda_kernel_launch_check(cudaError_t err, const ggml_cuda_kernel_launc
     const auto it = last_launches.find(key);
     if (it != last_launches.end()) {
         const ggml_cuda_kernel_launch_info & previous = it->second;
-        GGML_LOG_ERROR("  CUDA kernel diagnostics: previous successful wrapper launch: %s, addr=0x%zx, grid=(%u,%u,%u), block=(%u,%u,%u), shmem=%zu, stream=%p\n",
-                previous.name, (size_t) previous.kernel,
+        GGML_LOG_ERROR("  CUDA kernel diagnostics: previous launch on stream: sequence=%llu, thread=0x%zx, %s, addr=0x%zx, grid=(%u,%u,%u), block=(%u,%u,%u), shmem=%zu, stream=%p\n",
+                (unsigned long long) previous.sequence, (size_t) previous.thread, previous.name, (size_t) previous.kernel,
                 previous.block_nums.x, previous.block_nums.y, previous.block_nums.z,
                 previous.block_dims.x, previous.block_dims.y, previous.block_dims.z,
                 previous.shmem, (void *) previous.stream);
+    }
+    if (last_launch.sequence != 0 && last_launch.sequence != (it != last_launches.end() ? it->second.sequence : 0)) {
+        GGML_LOG_ERROR("  CUDA kernel diagnostics: previous launch globally: sequence=%llu, thread=0x%zx, %s, addr=0x%zx, grid=(%u,%u,%u), block=(%u,%u,%u), shmem=%zu, stream=%p\n",
+                (unsigned long long) last_launch.sequence, (size_t) last_launch.thread, last_launch.name, (size_t) last_launch.kernel,
+                last_launch.block_nums.x, last_launch.block_nums.y, last_launch.block_nums.z,
+                last_launch.block_dims.x, last_launch.block_dims.y, last_launch.block_dims.z,
+                last_launch.shmem, (void *) last_launch.stream);
     }
 }
 
@@ -2115,6 +2179,11 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 }
 
 static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst) {
+    std::unique_lock<std::mutex> diagnostic_lock(ggml_cuda_kernel_diagnostics_mutex(), std::defer_lock);
+    if (ggml_cuda_kernel_diagnostics_device_sync_enabled()) {
+        diagnostic_lock.lock();
+    }
+
     switch (dst->op) {
         case GGML_OP_ARGMAX:
             ggml_cuda_argmax(ctx, dst);
@@ -2460,9 +2529,36 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             return false;
     }
 
-    cudaError_t err = cudaGetLastError();
+    const cudaError_t launch_err = cudaGetLastError();
+    cudaError_t sync_err = cudaSuccess;
+    if (launch_err == cudaSuccess && ggml_cuda_kernel_diagnostics_enabled()) {
+        sync_err = ggml_cuda_kernel_diagnostics_synchronize(ctx.stream());
+    }
+    const cudaError_t err = launch_err != cudaSuccess ? launch_err : sync_err;
     if (err != cudaSuccess) {
         GGML_LOG_ERROR("%s: %s failed\n", __func__, ggml_op_desc(dst));
+        GGML_LOG_ERROR("  CUDA op error phase: %s, stream=%p, device_sync=%d\n",
+                launch_err != cudaSuccess ? "launch-check" : "synchronize", (void *) ctx.stream(),
+                ggml_cuda_kernel_diagnostics_device_sync_enabled());
+        GGML_LOG_ERROR("  CUDA op: dst=%s, type=%s, ne=[%lld,%lld,%lld,%lld]\n",
+                dst->name, ggml_type_name(dst->type),
+                (long long) dst->ne[0], (long long) dst->ne[1], (long long) dst->ne[2], (long long) dst->ne[3]);
+        for (int i = 0; i < GGML_MAX_SRC; ++i) {
+            const ggml_tensor * src = dst->src[i];
+            if (src == nullptr) {
+                continue;
+            }
+            GGML_LOG_ERROR("  CUDA op: src%d=%s, type=%s, ne=[%lld,%lld,%lld,%lld], nb=[%zu,%zu,%zu,%zu]\n",
+                    i, src->name, ggml_type_name(src->type),
+                    (long long) src->ne[0], (long long) src->ne[1], (long long) src->ne[2], (long long) src->ne[3],
+                    src->nb[0], src->nb[1], src->nb[2], src->nb[3]);
+        }
+        if (dst->op == GGML_OP_CONCAT) {
+            const int32_t dim = ((const int32_t *) dst->op_params)[0];
+            GGML_LOG_ERROR("  CUDA CONCAT: dim=%d, src0_cont=%d, src1_cont=%d, src0_cont3=%d, src1_cont3=%d\n",
+                    dim, ggml_is_contiguous(dst->src[0]), ggml_is_contiguous(dst->src[1]),
+                    ggml_is_contiguous_to_3(dst->src[0]), ggml_is_contiguous_to_3(dst->src[1]));
+        }
         CUDA_CHECK(err);
     }
 

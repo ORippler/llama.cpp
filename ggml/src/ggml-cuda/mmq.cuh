@@ -1375,7 +1375,52 @@ struct mmq_args {
     int64_t nchannels_x; int64_t nchannels_y; int64_t stride_channel_x; int64_t stride_channel_y; int64_t stride_channel_dst;
     int64_t nsamples_x; int64_t nsamples_y; int64_t stride_sample_x; int64_t stride_sample_y; int64_t stride_sample_dst;
     int64_t ncols_max;
+    const char * name_x; const char * name_dst;
 };
+
+template <ggml_type type, int J, bool fallback>
+static void mmq_log_launch_error(
+        cudaError_t err, const char * stage, const mmq_args & args, const dim3 & grid, const dim3 & block, size_t shmem,
+        cudaStream_t stream, int nsm, int ntiles_dst, bool fixup_needed, const float * tmp_fixup) {
+    if (err == cudaSuccess || !ggml_cuda_kernel_diagnostics_enabled()) {
+        return;
+    }
+
+    GGML_LOG_ERROR("  MMQ launch: stage=%s, src0=%s, dst=%s, type=%s, J=%d, fallback=%d, fixup=%d\n",
+            stage, args.name_x, args.name_dst, ggml_type_name(type), J, fallback, fixup_needed);
+    GGML_LOG_ERROR("  MMQ launch: grid=(%u,%u,%u), block=(%u,%u,%u), shmem=%zu, stream=%p, nsm=%d, ntiles_dst=%d\n",
+            grid.x, grid.y, grid.z, block.x, block.y, block.z, shmem, (void *) stream, nsm, ntiles_dst);
+    GGML_LOG_ERROR("  MMQ shape: ncols_x=%lld, nrows_x=%lld, ncols_dst=%lld, ncols_y=%lld, nrows_dst=%lld, ncols_max=%lld\n",
+            (long long) args.ncols_x, (long long) args.nrows_x, (long long) args.ncols_dst,
+            (long long) args.ncols_y, (long long) args.nrows_dst, (long long) args.ncols_max);
+    GGML_LOG_ERROR("  MMQ layout: channels=(%lld,%lld), samples=(%lld,%lld), stride_row_x=%lld, stride_channel=(%lld,%lld,%lld), stride_sample=(%lld,%lld,%lld)\n",
+            (long long) args.nchannels_x, (long long) args.nchannels_y,
+            (long long) args.nsamples_x, (long long) args.nsamples_y, (long long) args.stride_row_x,
+            (long long) args.stride_channel_x, (long long) args.stride_channel_y, (long long) args.stride_channel_dst,
+            (long long) args.stride_sample_x, (long long) args.stride_sample_y, (long long) args.stride_sample_dst);
+    GGML_LOG_ERROR("  MMQ pointers: x=%p, y=%p, ids_dst=%p, expert_bounds=%p, dst=%p, y_scale=%p, tmp_fixup=%p\n",
+            (const void *) args.x, (const void *) args.y, (const void *) args.ids_dst,
+            (const void *) args.expert_bounds, (void *) args.dst, (const void *) args.y_scale, (const void *) tmp_fixup);
+}
+
+struct mmq_launch_result {
+    cudaError_t launch_err;
+    cudaError_t sync_err;
+
+    cudaError_t error() const {
+        return launch_err != cudaSuccess ? launch_err : sync_err;
+    }
+};
+
+static mmq_launch_result mmq_get_launch_result(cudaStream_t stream) {
+    const cudaError_t launch_err = cudaGetLastError();
+    cudaError_t sync_err = cudaSuccess;
+    if (launch_err == cudaSuccess && ggml_cuda_kernel_diagnostics_enabled()) {
+        sync_err = ggml_cuda_kernel_diagnostics_synchronize(stream);
+    }
+
+    return { launch_err, sync_err };
+}
 
 static size_t mmq_get_nbytes_shared(const ggml_cuda_mmq_config & config, const int cc) {
     const size_t nbs_ids = config.J*sizeof(int);
@@ -1419,12 +1464,23 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
     const uint3 sample_ratio_fd    = init_fastdiv_values(sample_ratio);
 
     if (!ggml_cuda_mmq_get_stream_k(type, J, fallback, cc)) {
+        const ggml_cuda_kernel_launch_info info = ggml_cuda_kernel_launch_info_make(
+            "mul_mat_q_xy_tiling", reinterpret_cast<uintptr_t>(mul_mat_q<type, J, fallback>),
+            block_nums_xy_tiling, block_dims, nbytes_shared, stream);
         mul_mat_q<type, J, fallback><<<block_nums_xy_tiling, block_dims, nbytes_shared, stream>>>
             (args.x, args.y, args.ids_dst, args.expert_bounds, args.dst, nullptr, args.y_scale,
              blocks_per_ne00_fd, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
              channel_ratio_fd, nchannels_y_fd, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
              sample_ratio_fd, nsamples_y_fd, args.stride_sample_x, args.stride_sample_y, args.stride_sample_dst,
              ntx_fd);
+        if (ggml_cuda_kernel_diagnostics_enabled()) {
+            const mmq_launch_result result = mmq_get_launch_result(stream);
+            ggml_cuda_kernel_launch_check(result.launch_err, result.sync_err, info);
+            mmq_log_launch_error<type, J, fallback>(
+                    result.error(), "xy-tiling", args, block_nums_xy_tiling, block_dims, nbytes_shared, stream, nsm,
+                    block_nums_xy_tiling.x*block_nums_xy_tiling.y*block_nums_xy_tiling.z, false, nullptr);
+            CUDA_CHECK(result.error());
+        }
         return;
     }
 
@@ -1448,6 +1504,9 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
     const dim3 block_nums_fixup(block_nums_stream_k.x, config.I/warp_size, 1);
     const dim3 block_dims_fixup(block_dims.x, block_dims.y/2, block_dims.z);
 
+    const ggml_cuda_kernel_launch_info stream_k_info = ggml_cuda_kernel_launch_info_make(
+        "mul_mat_q_stream_k", reinterpret_cast<uintptr_t>(mul_mat_q<type, J, fallback>),
+        block_nums_stream_k, block_dims, nbytes_shared, stream);
     mul_mat_q<type, J, fallback><<<block_nums_stream_k, block_dims, nbytes_shared, stream>>>
         (args.x, args.y, args.ids_dst, args.expert_bounds, args.dst, tmp_fixup.ptr, args.y_scale,
          blocks_per_ne00_fd, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
@@ -1456,14 +1515,35 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
          ntx_fd);
 
     if (!fixup_needed) {
+        if (ggml_cuda_kernel_diagnostics_enabled()) {
+            const mmq_launch_result result = mmq_get_launch_result(stream);
+            ggml_cuda_kernel_launch_check(result.launch_err, result.sync_err, stream_k_info);
+            mmq_log_launch_error<type, J, fallback>(
+                    result.error(), "stream-k", args, block_nums_stream_k, block_dims, nbytes_shared, stream, nsm, ntiles_dst, false, tmp_fixup.ptr);
+            CUDA_CHECK(result.error());
+        }
         return;
     }
 
-    CUDA_CHECK(cudaGetLastError());
+    const mmq_launch_result result = mmq_get_launch_result(stream);
+    ggml_cuda_kernel_launch_check(result.launch_err, result.sync_err, stream_k_info);
+    mmq_log_launch_error<type, J, fallback>(
+            result.error(), "stream-k", args, block_nums_stream_k, block_dims, nbytes_shared, stream, nsm, ntiles_dst, fixup_needed, tmp_fixup.ptr);
+    CUDA_CHECK(result.error());
+    const ggml_cuda_kernel_launch_info fixup_info = ggml_cuda_kernel_launch_info_make(
+        "mul_mat_q_stream_k_fixup", reinterpret_cast<uintptr_t>(mul_mat_q_stream_k_fixup<type, J, fallback>),
+        block_nums_fixup, block_dims_fixup, 0, stream);
     mul_mat_q_stream_k_fixup<type, J, fallback><<<block_nums_fixup, block_dims_fixup, 0, stream>>>
         (args.ids_dst, args.expert_bounds, args.dst, tmp_fixup.ptr, blocks_per_ne00_fd, args.nrows_x, args.ncols_dst,
          args.nrows_dst, nchannels_y_fd, args.stride_channel_dst, nsamples_y_fd, args.stride_sample_dst,
          ntx_fd);
+    if (ggml_cuda_kernel_diagnostics_enabled()) {
+        const mmq_launch_result fixup_result = mmq_get_launch_result(stream);
+        ggml_cuda_kernel_launch_check(fixup_result.launch_err, fixup_result.sync_err, fixup_info);
+        mmq_log_launch_error<type, J, fallback>(
+                fixup_result.error(), "stream-k-fixup", args, block_nums_fixup, block_dims_fixup, 0, stream, nsm, ntiles_dst, true, tmp_fixup.ptr);
+        CUDA_CHECK(fixup_result.error());
+    }
 }
 
 template <ggml_type type, bool fallback>

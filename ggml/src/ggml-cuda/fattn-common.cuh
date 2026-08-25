@@ -1001,9 +1001,38 @@ void launch_fattn(
     const int id  = ggml_cuda_get_device();
     const int cc  = ggml_cuda_info().devices[id].cc;
     const int nsm = ggml_cuda_info().devices[id].nsm;
+    const bool diagnostics = ggml_cuda_kernel_diagnostics_enabled();
 
     const ggml_cuda_flash_attn_ext_f16_extra_data f16_extra =
         ggml_cuda_flash_attn_ext_get_f16_extra_data(KQV, need_f16_K, need_f16_V);
+
+    if (diagnostics) {
+        GGML_LOG_DEBUG("CUDA FATTN path: dst=%p stream=%p DV=%d ncols1=%d ncols2=%d nwarps=%d nbatch_fa=%d need_f16_K=%d need_f16_V=%d stream_k=%d\n",
+                (void *) dst, (void *) main_stream, DV, ncols1, ncols2, nwarps, nbatch_fa, need_f16_K, need_f16_V, stream_k);
+        GGML_LOG_DEBUG("CUDA FATTN Q: type=%s ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] data=%p\n",
+                ggml_type_name(Q->type),
+                (long long) Q->ne[0], (long long) Q->ne[1], (long long) Q->ne[2], (long long) Q->ne[3],
+                Q->nb[0], Q->nb[1], Q->nb[2], Q->nb[3], Q->data);
+        GGML_LOG_DEBUG("CUDA FATTN K: type=%s ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] data=%p cont=%d scratch=%p\n",
+                ggml_type_name(K->type),
+                (long long) K->ne[0], (long long) K->ne[1], (long long) K->ne[2], (long long) K->ne[3],
+                K->nb[0], K->nb[1], K->nb[2], K->nb[3], K->data, ggml_is_contiguously_allocated(K), (void *) f16_extra.K);
+        GGML_LOG_DEBUG("CUDA FATTN V: type=%s ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] data=%p cont=%d K_view=%d scratch=%p\n",
+                ggml_type_name(V->type),
+                (long long) V->ne[0], (long long) V->ne[1], (long long) V->ne[2], (long long) V->ne[3],
+                V->nb[0], V->nb[1], V->nb[2], V->nb[3], V->data, ggml_is_contiguously_allocated(V), V_is_K_view, (void *) f16_extra.V);
+        if (mask) {
+            GGML_LOG_DEBUG("CUDA FATTN mask: ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] data=%p\n",
+                    (long long) mask->ne[0], (long long) mask->ne[1], (long long) mask->ne[2], (long long) mask->ne[3],
+                    mask->nb[0], mask->nb[1], mask->nb[2], mask->nb[3], mask->data);
+        }
+        if (sinks) {
+            GGML_LOG_DEBUG("CUDA FATTN sinks: type=%s ne=[%lld,%lld,%lld,%lld] nb=[%zu,%zu,%zu,%zu] data=%p\n",
+                    ggml_type_name(sinks->type),
+                    (long long) sinks->ne[0], (long long) sinks->ne[1], (long long) sinks->ne[2], (long long) sinks->ne[3],
+                    sinks->nb[0], sinks->nb[1], sinks->nb[2], sinks->nb[3], sinks->data);
+        }
+    }
 
     ggml_cuda_pool_alloc<int>    KV_max(pool);
     ggml_cuda_pool_alloc<float>  dst_tmp(pool);
@@ -1018,6 +1047,26 @@ void launch_fattn(
     size_t nb21 = V->nb[1];
     size_t nb22 = V->nb[2];
     size_t nb23 = V->nb[3];
+
+    const auto check_f16_conversion = [&](const char * name, const ggml_tensor * src, const void * converted) {
+        if (!diagnostics) {
+            return;
+        }
+
+        cudaError_t err = cudaGetLastError();
+        if (err == cudaSuccess) {
+            err = cudaStreamSynchronize(main_stream);
+        }
+        if (err != cudaSuccess) {
+            GGML_LOG_ERROR("  FATTN F16 conversion: tensor=%s, type=%s, ne=[%lld,%lld,%lld,%lld], src=%p, dst=%p\n",
+                    name, ggml_type_name(src->type),
+                    (long long) src->ne[0], (long long) src->ne[1], (long long) src->ne[2], (long long) src->ne[3],
+                    src->data, converted);
+        }
+        CUDA_CHECK(err);
+        GGML_LOG_DEBUG("CUDA FATTN stage complete: dst=%p conversion=%s type=%s elements=%lld src=%p converted=%p\n",
+                (void *) dst, name, ggml_type_name(src->type), (long long) ggml_nelements(src), src->data, converted);
+    };
 
     if (need_f16_K && K->type != GGML_TYPE_F16) {
         const size_t bs = ggml_blck_size(K->type);
@@ -1044,6 +1093,7 @@ void launch_fattn(
             nb12 = K->ne[1] * nb11;
             nb13 = K->ne[2] * nb12;
         }
+        check_f16_conversion("K", K, K_f16);
         K_data = (char *) K_f16;
     }
 
@@ -1053,6 +1103,9 @@ void launch_fattn(
             nb21   = nb11;
             nb22   = nb12;
             nb23   = nb13;
+            if (diagnostics) {
+                GGML_LOG_DEBUG("CUDA FATTN stage complete: dst=%p conversion=V reused_K=1 converted=%p\n", (void *) dst, (const void *) V_data);
+            }
         } else {
             const size_t bs = ggml_blck_size(V->type);
             const size_t ts = ggml_type_size(V->type);
@@ -1079,6 +1132,7 @@ void launch_fattn(
                 nb22 = V->ne[1] * nb21;
                 nb23 = V->ne[2] * nb22;
             }
+            check_f16_conversion("V", V, V_f16);
             V_data = (char *) V_f16;
         }
     }
@@ -1091,7 +1145,13 @@ void launch_fattn(
     // Optional optimization where the mask is scanned to determine whether part of the calculation can be skipped.
     // Only worth the overhead if there is at lease one FATTN_KQ_STRIDE x FATTN_KQ_STRIDE square to be skipped or
     //     multiple sequences of possibly different lengths.
-    if (mask && K->ne[1] % FATTN_KQ_STRIDE == 0 && (Q->ne[1] >= 1024 || Q->ne[3] > 1)) {
+    const bool use_KV_max = mask && K->ne[1] % FATTN_KQ_STRIDE == 0 && (Q->ne[1] >= 1024 || Q->ne[3] > 1);
+    if (diagnostics) {
+        GGML_LOG_DEBUG("CUDA FATTN KV_max: dst=%p use=%d has_mask=%d K_ne1=%lld stride=%d divisible=%d Q_ne1=%lld Q_ne3=%lld\n",
+                (void *) dst, use_KV_max, mask != nullptr, (long long) K->ne[1], FATTN_KQ_STRIDE,
+                K->ne[1] % FATTN_KQ_STRIDE == 0, (long long) Q->ne[1], (long long) Q->ne[3]);
+    }
+    if (use_KV_max) {
         const int64_t s31 = mask->nb[1] / sizeof(half2);
         const int64_t s33 = mask->nb[3] / sizeof(half2);
 
@@ -1106,6 +1166,10 @@ void launch_fattn(
         ggml_cuda_kernel_launch(flash_attn_mask_to_KV_max<ncols1>, launch_params,
             (const half2 *) mask->data, KV_max.ptr, iter_k, s31, s33);
         CUDA_CHECK(cudaGetLastError());
+        if (diagnostics) {
+            GGML_LOG_DEBUG("CUDA FATTN stage complete: dst=%p KV_max=%p elements=%d iter_k=%d s31=%lld s33=%lld\n",
+                    (void *) dst, (void *) KV_max.ptr, ne_KV_max, iter_k, (long long) s31, (long long) s33);
+        }
     }
 
     const dim3 block_dim(warp_size, nwarps, 1);
@@ -1117,13 +1181,14 @@ void launch_fattn(
     const int ntiles_KV = (K->ne[1] + nbatch_fa - 1) / nbatch_fa; // Max. number of parallel blocks limited by KV cache length.
 
     dim3 blocks_num;
+    bool use_stream_k = false;
     if (stream_k) {
         // For short contexts it can be faster to have the SMs work on whole tiles because this lets us skip the fixup.
         const int max_blocks = max_blocks_per_sm*nsm;
         const int tiles_nwaves = (ntiles_dst + max_blocks - 1) / max_blocks;
         const int tiles_efficiency_percent = 100 * ntiles_dst / (max_blocks*tiles_nwaves);
 
-        const bool use_stream_k = cc >= GGML_CUDA_CC_ADA_LOVELACE || amd_wmma_available(cc) || tiles_efficiency_percent < 75;
+        use_stream_k = cc >= GGML_CUDA_CC_ADA_LOVELACE || amd_wmma_available(cc) || tiles_efficiency_percent < 75;
 
         blocks_num.x = ntiles_dst;
         blocks_num.y = 1;
@@ -1184,6 +1249,17 @@ void launch_fattn(
         }
     }
 
+    if (diagnostics) {
+        GGML_LOG_DEBUG("CUDA FATTN schedule: dst=%p nsm=%d max_blocks_per_sm=%d ntiles_x=%d ntiles_z_gqa=%d ntiles_dst=%d ntiles_KV=%d stream_k=%d use_stream_k=%d parallel_blocks=%d grid=[%u,%u,%u] block=[%u,%u,%u] shmem=%zu\n",
+                (void *) dst, nsm, max_blocks_per_sm, ntiles_x, ntiles_z_gqa, ntiles_dst, ntiles_KV,
+                stream_k, use_stream_k, parallel_blocks,
+                blocks_num.x, blocks_num.y, blocks_num.z, block_dim.x, block_dim.y, block_dim.z, nbytes_shared);
+        GGML_LOG_DEBUG("CUDA FATTN buffers: dst=%p Q=%p K=%p V=%p mask=%p KV_max=%p output=%p meta=%p nbK=[%zu,%zu,%zu] nbV=[%zu,%zu,%zu]\n",
+                (void *) dst, Q->data, (const void *) K_data, (const void *) V_data, mask ? mask->data : nullptr,
+                (void *) KV_max.ptr, !stream_k && parallel_blocks > 1 ? (void *) dst_tmp.ptr : KQV->data,
+                (void *) dst_tmp_meta.ptr, nb11, nb12, nb13, nb21, nb22, nb23);
+    }
+
     float scale         = 1.0f;
     float max_bias      = 0.0f;
     float logit_softcap = 0.0f;
@@ -1201,6 +1277,11 @@ void launch_fattn(
 
     const float m0 = powf(2.0f, -(max_bias       ) / n_head_log2);
     const float m1 = powf(2.0f, -(max_bias / 2.0f) / n_head_log2);
+
+    if (diagnostics) {
+        GGML_LOG_DEBUG("CUDA FATTN params: dst=%p scale=%g max_bias=%g m0=%g m1=%g n_head=%u n_head_log2=%u logit_softcap=%g sinks=%p\n",
+                (void *) dst, scale, max_bias, m0, m1, n_head, n_head_log2, logit_softcap, sinks ? sinks->data : nullptr);
+    }
 
     // TODO other tensor dimensions after removal of WMMA kernel:
     const uint3 ne01 = init_fastdiv_values(Q->ne[1]);
@@ -1224,6 +1305,10 @@ void launch_fattn(
         mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0
     );
     CUDA_CHECK(cudaGetLastError());
+    if (diagnostics) {
+        GGML_LOG_DEBUG("CUDA FATTN stage complete: dst=%p main kernel grid=[%u,%u,%u]\n",
+                (void *) dst, blocks_num.x, blocks_num.y, blocks_num.z);
+    }
 
     if (stream_k) {
         if ((int)blocks_num.x % ntiles_dst == 0 && (int)blocks_num.x > ntiles_dst) {
@@ -1239,6 +1324,12 @@ void launch_fattn(
             const dim3 blocks_num_combine = {(unsigned)ntiles_dst, ncols1, ncols2};
 
             const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks_num_combine, block_dim_combine, 0, main_stream);
+            if (diagnostics) {
+                GGML_LOG_DEBUG("CUDA FATTN fixup: dst=%p type=uniform nblocks=%d ntiles_dst=%d bpt=%d grid=[%u,%u,%u] block=[%u,%u,%u]\n",
+                        (void *) dst, nblocks_sk, ntiles_dst, bpt,
+                        blocks_num_combine.x, blocks_num_combine.y, blocks_num_combine.z,
+                        block_dim_combine.x, block_dim_combine.y, block_dim_combine.z);
+            }
             ggml_cuda_kernel_launch(flash_attn_stream_k_fixup_uniform<DV, ncols1, ncols2>, launch_params,
                 (float *) KQV->data, dst_tmp_meta.ptr,
                  Q->ne[1], Q->ne[2], K->ne[2], nblocks_sk,
@@ -1256,6 +1347,12 @@ void launch_fattn(
             const dim3 blocks_num_combine = {blocks_num.x, ncols1, ncols2};
 
             const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks_num_combine, block_dim_combine, 0, main_stream);
+            if (diagnostics) {
+                GGML_LOG_DEBUG("CUDA FATTN fixup: dst=%p type=general total_work=%d grid=[%u,%u,%u] block=[%u,%u,%u]\n",
+                        (void *) dst, total_work,
+                        blocks_num_combine.x, blocks_num_combine.y, blocks_num_combine.z,
+                        block_dim_combine.x, block_dim_combine.y, block_dim_combine.z);
+            }
             ggml_cuda_kernel_launch(flash_attn_stream_k_fixup_general<DV, ncols1, ncols2>, launch_params,
                 (float *) KQV->data, dst_tmp_meta.ptr,
                  Q->ne[1], Q->ne[2], gqa_ratio, total_work,
@@ -1267,8 +1364,17 @@ void launch_fattn(
         const size_t nbytes_shared_combine = parallel_blocks*sizeof(float2);
 
         const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks_num_combine, block_dim_combine, nbytes_shared_combine, main_stream);
+        if (diagnostics) {
+            GGML_LOG_DEBUG("CUDA FATTN fixup: dst=%p type=parallel parallel_blocks=%d grid=[%u,%u,%u] block=[%u,%u,%u] shmem=%zu\n",
+                    (void *) dst, parallel_blocks,
+                    blocks_num_combine.x, blocks_num_combine.y, blocks_num_combine.z,
+                    block_dim_combine.x, block_dim_combine.y, block_dim_combine.z, nbytes_shared_combine);
+        }
         ggml_cuda_kernel_launch(flash_attn_combine_results<DV>, launch_params,
             dst_tmp.ptr, dst_tmp_meta.ptr, (float *) KQV->data, parallel_blocks);
     }
     CUDA_CHECK(cudaGetLastError());
+    if (diagnostics) {
+        GGML_LOG_DEBUG("CUDA FATTN path complete: dst=%p stream=%p\n", (void *) dst, (void *) main_stream);
+    }
 }
