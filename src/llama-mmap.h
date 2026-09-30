@@ -41,6 +41,23 @@ private:
     std::unique_ptr<impl> pimpl;
 };
 
+#ifdef _WIN32
+// second handle to an open file that bypasses the page cache, for positional reads aligned to alignment()
+struct llama_file_unbuffered {
+    llama_file_unbuffered(const llama_file & file);
+    ~llama_file_unbuffered();
+
+    bool valid() const;
+    size_t alignment() const;
+
+    // returns the number of bytes read, or -1 if the volume rejects unbuffered reads
+    int64_t read_at(void * dst, size_t size, size_t offset) const;
+private:
+    struct impl;
+    std::unique_ptr<impl> pimpl;
+};
+#endif
+
 struct llama_mmap {
     // list of [first, last) byte ranges within a file
     using ranges = std::vector<std::pair<size_t, size_t>>;

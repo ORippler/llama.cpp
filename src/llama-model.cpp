@@ -47,6 +47,8 @@
 
 #if defined(__linux__)
 #include <unistd.h>
+#elif defined(_WIN32)
+#include <malloc.h>
 #endif
 
 static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params & params) {
@@ -1195,6 +1197,9 @@ struct llama_model::impl {
     const ggml_tensor * direct_ple_tensor = nullptr;
     size_t direct_ple_offset = 0;
     std::unique_ptr<llama_file> direct_ple_file;
+#ifdef _WIN32
+    std::unique_ptr<llama_file_unbuffered> direct_ple_reader;
+#endif
     std::atomic<bool> direct_ple_failed { false };
 
     // objects representing data potentially being locked in memory
@@ -1893,11 +1898,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
     if (ml.use_direct_io && params.ple_direct_io && per_layer_tok_embd && ml.lazy.has(per_layer_tok_embd)) {
         const auto * weight = ml.get_weight(ggml_get_name(per_layer_tok_embd));
         GGML_ASSERT(weight);
+#ifdef _WIN32
+        // llama_file reads through the page cache on Windows, so open a second, unbuffered handle for the rows
+        auto reader = std::make_unique<llama_file_unbuffered>(*ml.files[weight->idx]);
+        if (reader->valid()) {
+            pimpl->direct_ple_reader = std::move(reader);
+#else
         if (ml.files[weight->idx]->has_direct_io()) {
+#endif
             pimpl->direct_ple_tensor = per_layer_tok_embd;
             pimpl->direct_ple_offset = weight->offs;
             pimpl->direct_ple_file = std::move(ml.files[weight->idx]);
@@ -2280,14 +2292,18 @@ bool llama_model::has_direct_ple_rows(const ggml_tensor * tensor) const {
 }
 
 void llama_model::read_direct_ple_rows(const ggml_tensor * tensor, const int32_t * rows, size_t n_rows, void * dst) const {
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
     GGML_ASSERT(has_direct_ple_rows(tensor));
     if (n_rows == 0) {
         return;
     }
 
     const llama_file & file = *pimpl->direct_ple_file;
+#ifdef _WIN32
+    const size_t alignment = pimpl->direct_ple_reader->alignment();
+#else
     const size_t alignment = file.read_alignment();
+#endif
     const size_t row_bytes = ggml_row_size(tensor->type, tensor->ne[0]);
     auto * output = static_cast<uint8_t *>(dst);
 
@@ -2309,12 +2325,19 @@ void llama_model::read_direct_ple_rows(const ggml_tensor * tensor, const int32_t
 
     auto read_range = [&](size_t begin, size_t end) {
         const size_t buffer_size = ((row_bytes + alignment - 1) / alignment + 1) * alignment;
+#ifdef _WIN32
+        std::unique_ptr<void, decltype(&_aligned_free)> buffer(_aligned_malloc(buffer_size, alignment), _aligned_free);
+        if (!buffer) {
+            throw std::runtime_error("PLE direct I/O buffer allocation failed");
+        }
+#else
         void * raw_buffer = nullptr;
         const int alloc_result = posix_memalign(&raw_buffer, alignment, buffer_size);
         if (alloc_result != 0) {
             throw std::runtime_error(format("PLE direct I/O buffer allocation failed: %s", strerror(alloc_result)));
         }
         std::unique_ptr<void, decltype(&std::free)> buffer(raw_buffer, std::free);
+#endif
 
         size_t cached_first = SIZE_MAX;
         size_t cached_size = 0;
@@ -2326,6 +2349,12 @@ void llama_model::read_direct_ple_rows(const ggml_tensor * tensor, const int32_t
             const size_t size = (offset - first + row_bytes + alignment - 1) & ~(alignment - 1);
 
             if (first != cached_first || size != cached_size) {
+#ifdef _WIN32
+                const int64_t n_read = pimpl->direct_ple_reader->read_at(buffer.get(), size, first);
+                if (n_read < 0) {
+                    return false;
+                }
+#else
                 ssize_t n_read;
                 do {
                     n_read = pread(file.file_id(), buffer.get(), size, (off_t) first);
@@ -2337,6 +2366,7 @@ void llama_model::read_direct_ple_rows(const ggml_tensor * tensor, const int32_t
                 if (n_read < 0) {
                     throw std::runtime_error(format("PLE direct I/O read failed: %s", strerror(errno)));
                 }
+#endif
                 if ((size_t) n_read < std::min(size, file.size() - first) || (size_t) n_read < offset - first + row_bytes) {
                     throw std::runtime_error("PLE direct I/O read reached the end of the file");
                 }

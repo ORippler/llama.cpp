@@ -437,6 +437,67 @@ uint32_t llama_file::read_u32() { return pimpl->read_u32(); }
 void llama_file::write_raw(const void * ptr, size_t len) const { pimpl->write_raw(ptr, len); }
 void llama_file::write_u32(uint32_t val) const { pimpl->write_u32(val); }
 
+#ifdef _WIN32
+// llama_file_unbuffered
+
+struct llama_file_unbuffered::impl {
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    size_t alignment = 4096;
+};
+
+llama_file_unbuffered::llama_file_unbuffered(const llama_file & file) : pimpl(std::make_unique<impl>()) {
+    // overlapped, so that reads from several threads are not serialized on the file object
+    HANDLE src = (HANDLE) _get_osfhandle(file.file_id());
+    pimpl->handle = ReOpenFile(src, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED);
+    if (pimpl->handle == INVALID_HANDLE_VALUE) {
+        LLAMA_LOG_WARN("%s: ReOpenFile failed: %s\n", __func__, llama_format_win_err(GetLastError()).c_str());
+        return;
+    }
+
+    FILE_STORAGE_INFO info = {};
+    if (GetFileInformationByHandleEx(pimpl->handle, FileStorageInfo, &info, sizeof(info))) {
+        pimpl->alignment = std::max<size_t>(info.LogicalBytesPerSector, info.PhysicalBytesPerSectorForPerformance);
+    }
+}
+
+llama_file_unbuffered::~llama_file_unbuffered() {
+    if (pimpl->handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(pimpl->handle);
+    }
+}
+
+bool llama_file_unbuffered::valid() const { return pimpl->handle != INVALID_HANDLE_VALUE; }
+size_t llama_file_unbuffered::alignment() const { return pimpl->alignment; }
+
+int64_t llama_file_unbuffered::read_at(void * dst, size_t size, size_t offset) const {
+    // one event per thread; ReadFile resets it when the read starts
+    struct event {
+        HANDLE h = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        ~event() { if (h) { CloseHandle(h); } }
+    };
+    static thread_local event ev;
+    if (!ev.h) {
+        throw std::runtime_error(format("CreateEvent failed: %s", llama_format_win_err(GetLastError()).c_str()));
+    }
+
+    OVERLAPPED ov = {};
+    ov.Offset     = (DWORD) (offset & 0xffffffff);
+    ov.OffsetHigh = (DWORD) (offset >> 32);
+    ov.hEvent     = ev.h;
+
+    DWORD n_read = 0;
+    if ((ReadFile(pimpl->handle, dst, (DWORD) size, nullptr, &ov) || GetLastError() == ERROR_IO_PENDING) &&
+        GetOverlappedResult(pimpl->handle, &ov, &n_read, TRUE)) {
+        return n_read;
+    }
+    const DWORD err = GetLastError();
+    if (err == ERROR_HANDLE_EOF)        { return 0; }
+    if (err == ERROR_INVALID_PARAMETER) { return -1; }
+    throw std::runtime_error(format("ReadFile failed: %s", llama_format_win_err(err).c_str()));
+}
+#endif
+
 // llama_mmap
 
 #if defined(_POSIX_MAPPED_FILES) || defined(_WIN32)
