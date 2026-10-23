@@ -7935,6 +7935,67 @@ struct test_mul_mat_vec_fusion : public test_case {
     }
 };
 
+struct test_mul_mat_fp8_precision : public test_mul_mat_vec_fusion {
+    const int32_t prec_acc;
+    const std::array<int32_t, 2> prec_src1;
+
+    test_mul_mat_fp8_precision(ggml_prec prec_acc, std::array<int32_t, 2> prec_src1,
+            bool use_id, bool with_bias, bool with_gate, bool with_lane_scale, int64_t m = 1)
+        : test_mul_mat_vec_fusion(GGML_TYPE_F8_E4M3, GGML_GLU_OP_SWIGLU, m, 32, 4096,
+            use_id, 4, 2, false, with_bias, with_gate, with_lane_scale, {2, 1}),
+          prec_acc(prec_acc), prec_src1(prec_src1) {}
+
+    std::string vars() override {
+        return test_mul_mat_vec_fusion::vars() + "," + VARS_TO_STR2(prec_acc, prec_src1);
+    }
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "MUL_MAT_FP8_PRECISION";
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx, ggml_context * ctx_weights) override {
+        ggml_tensor * out = test_mul_mat_vec_fusion::build_graph(ctx, ctx_weights);
+        int lane = 0;
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->op == GGML_OP_MUL_MAT || t->op == GGML_OP_MUL_MAT_ID) {
+                ggml_prec_set_acc(t, ggml_prec(prec_acc));
+                ggml_prec_set_src(t, ggml_prec(prec_src1[lane++]), 1);
+            }
+        }
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        test_mul_mat_vec_fusion::initialize_tensors(ctx);
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->op != GGML_OP_MUL_MAT && t->op != GGML_OP_MUL_MAT_ID) {
+                continue;
+            }
+            ggml_tensor * weights = t->src[0];
+            ggml_tensor * activations = t->src[1];
+            const bool src1_f32 = test_get_op_params_i32(t, 3) == GGML_PREC_F32;
+            std::vector<float> w(ggml_nelements(weights));
+            std::vector<float> a(ggml_nelements(activations));
+            for (size_t i = 0; i < w.size(); ++i) {
+                // The other lane ignores values that require F32 activations.
+                w[i] = i % 2 == 0 || src1_f32 ? 0.015625f : 0.0f;
+            }
+            for (size_t i = 0; i < a.size(); ++i) {
+                a[i] = i % 2 == 0 ? 1.015625f : 1.0009765625f;
+            }
+            std::vector<uint8_t> wq(ggml_nbytes(weights));
+            ggml_quantize_chunk(weights->type, w.data(), wq.data(), 0, ggml_nrows(weights), weights->ne[0], nullptr);
+            ggml_backend_tensor_set(weights, wq.data(), 0, wq.size());
+            ggml_backend_tensor_set(activations, a.data(), 0, a.size()*sizeof(float));
+        }
+    }
+
+    double max_nmse_err() override {
+        return 1e-10;
+    }
+};
+
 // GGML_OP_SUM
 struct test_sum : public test_case {
     const ggml_type type;
@@ -12256,6 +12317,30 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
 
     test_cases.emplace_back(new test_opt_step_adamw(GGML_TYPE_F32, {10, 5, 4, 3}));
     test_cases.emplace_back(new test_opt_step_sgd(GGML_TYPE_F32, {10, 5, 4, 3}));
+
+    for (ggml_prec prec_acc : {GGML_PREC_UNDEFINED, GGML_PREC_F32, GGML_PREC_BF16, GGML_PREC_F16}) {
+        for (std::array<int32_t, 2> prec_src1 : {
+                std::array<int32_t, 2>{GGML_PREC_UNDEFINED, GGML_PREC_UNDEFINED},
+                std::array<int32_t, 2>{GGML_PREC_BF16, GGML_PREC_BF16},
+                std::array<int32_t, 2>{GGML_PREC_F32, GGML_PREC_UNDEFINED},
+                std::array<int32_t, 2>{GGML_PREC_UNDEFINED, GGML_PREC_F32},
+                std::array<int32_t, 2>{GGML_PREC_F32, GGML_PREC_F32}}) {
+            for (bool use_id : {false, true}) {
+                for (bool with_bias : {false, true}) {
+                    for (bool with_gate : {false, true}) {
+                        for (bool with_lane_scale : {false, true}) {
+                            test_cases.emplace_back(new test_mul_mat_fp8_precision(prec_acc, prec_src1,
+                                use_id, with_bias, with_gate, with_lane_scale));
+                        }
+                    }
+                }
+                for (int64_t m : {2, 8}) {
+                    test_cases.emplace_back(new test_mul_mat_fp8_precision(prec_acc, prec_src1,
+                        use_id, false, false, false, m));
+                }
+            }
+        }
+    }
 
     for (bool with_bias : {false, true}) {
         test_cases.emplace_back(new test_mul_mat_vec_fusion(GGML_TYPE_F8_E4M3, GGML_GLU_OP_SWIGLU, 16, 32, 256,

@@ -1890,6 +1890,13 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_f(const ggml_tensor * tensor, cons
         return false;
     }
 
+    // Fused outputs do not carry the matmul precision settings.
+    if (src0->type == GGML_TYPE_F8_E4M3 &&
+            (ggml_get_op_params_i32(tensor, 3) == GGML_PREC_F32 ||
+             (gate && ggml_get_op_params_i32(gate, 3) == GGML_PREC_F32))) {
+        return false;
+    }
+
     //we only support fusion for ncols_dst = 1
     if (tensor->op == GGML_OP_MUL_MAT && dst->ne[1] != 1) {
         return false;
@@ -4477,6 +4484,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
             }
 
             if (op == GGML_OP_MUL_MAT && !with_bias && src0->type == GGML_TYPE_F8_E4M3 &&
+                    ggml_get_op_params_i32(mm_node, 3) != GGML_PREC_F32 &&
                     ggml_cuda_mul_mat_fp8(*cuda_ctx, src0, src1, scale_node, scale)) {
                 return 1;
             }
@@ -5665,7 +5673,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     return false;
                 }
                 if (op->op == GGML_OP_MUL_MAT_ID && ggml_get_op_params_i32(op, 3) == GGML_PREC_F32) {
-                    return false;
+                    const int cc = ggml_cuda_info().devices[dev_ctx->device].cc;
+                    const int warp_size = ggml_cuda_info().devices[dev_ctx->device].warp_size;
+                    if (a->type != GGML_TYPE_F8_E4M3 || b->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32 ||
+                            !ggml_cuda_should_use_mmvf(a, cc, warp_size, b->ne[2])) {
+                        return false;
+                    }
                 }
 #ifdef GGML_USE_MUSA
                 const int cc = ggml_cuda_info().devices[dev_ctx->device].cc;
