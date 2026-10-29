@@ -197,6 +197,24 @@ cmake --build build --config Release
 
 To use a specific CCCL version instead of the one bundled with the installed CUDA Toolkit, add `-DGGML_CUDA_CCCL_VERSION=vMAJOR.MINOR.PATCH`. CUB DeviceTopK requires CCCL 3.4.3 or newer; older versions use the sort fallback.
 
+#### Experimental FlashInfer FP8 prefill
+
+`GGML_CUDA_FLASHINFER=ON` enables an optional SM120 prefill adapter for FP8 E4M3 K/V, 24 query heads, 4 KV heads, and head dimension 256. It handles one stream with at least 128 queries and a validated causal mask. Decode, other masks, and other attention shapes use the existing CUDA kernels. KV scales remain in the llama graph; the adapter converts Q to unscaled E4M3 and converts the BF16 result to F32.
+
+This requires native Linux, CUDA 13 or newer, and FlashInfer source pinned to `8ec9464ce81d81c9e3670aa09acd1a8780f83695`. Use a Python environment with FlashInfer's dependencies, including `nvidia-cutlass-dsl==4.8.1`. Released FlashInfer 0.7.2 does not provide this kernel configuration. The build exports the kernel to a native object; inference does not use Python or TVM FFI. Keep the CuTe DSL runtime library available when moving the binaries to another environment.
+
+```bash
+/path/to/python -m pip install flashinfer-python==0.7.2 nvidia-cutlass-dsl==4.8.1
+git clone https://github.com/flashinfer-ai/flashinfer.git /path/to/flashinfer
+git -C /path/to/flashinfer checkout 8ec9464ce81d81c9e3670aa09acd1a8780f83695
+cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_FLASHINFER=ON \
+    -DGGML_CUDA_FLASHINFER_SOURCE_DIR=/path/to/flashinfer \
+    -DPython3_EXECUTABLE=/path/to/python -DCMAKE_CUDA_ARCHITECTURES=120a-real
+cmake --build build --config Release
+```
+
+Select FP8 KV with `-ctk f8_e4m3 -ctv f8_e4m3 -fa on`. Set `GGML_CUDA_DISABLE_FLASHINFER=1` to compare with the existing kernels in the same build. Model quality must be evaluated because Q and the intermediate attention probabilities also use FP8.
+
 Note that this also builds the CPU backend by default. On Windows on ARM, MSVC's
 support for the ARM NEON intrinsics used by the CPU backend may be incomplete, so
 a CUDA build produced entirely with MSVC might have a slower CPU backend. If CPU

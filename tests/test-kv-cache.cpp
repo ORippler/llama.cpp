@@ -1,5 +1,8 @@
 #include "llama-kv-cache.h"
 #include "llama-model.h"
+#include "llama-graph.h"
+
+#include <cmath>
 
 #include <numeric>
 #include <string>
@@ -64,6 +67,42 @@ int main() {
         }
 
         llama_log_set(nullptr, nullptr);
+    }
+
+    {
+        ggml_context_ptr ctx(ggml_init({ 128*1024, nullptr, false }));
+        ggml_tensor * mask = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F16, 256, 128, 1, 1);
+        auto * values = (ggml_fp16_t *) mask->data;
+        ggml_context_ptr ctx_ops(ggml_init({ 8*ggml_tensor_overhead(), nullptr, true }));
+        ggml_tensor * q = ggml_new_tensor_4d(ctx_ops.get(), GGML_TYPE_F32, 256, 128, 24, 1);
+        ggml_tensor * k = ggml_new_tensor_4d(ctx_ops.get(), GGML_TYPE_F8_E4M3, 256, 256, 4, 1);
+        ggml_tensor * v = ggml_dup_tensor(ctx_ops.get(), k);
+        ggml_tensor * attn = ggml_flash_attn_ext(ctx_ops.get(), q, k, v, mask, 1.0f/16, 0, 0);
+        llama_hparams hparams = {};
+        llama_cparams cparams = {};
+        llm_graph_input_attn_kv inp(hparams, cparams, nullptr);
+        inp.self_attn_mask.raw = mask;
+        inp.flash_attn.push_back(attn);
+        for (int n_kv : {129, 256}) {
+            for (int i = 0; i < 128; ++i) {
+                for (int j = 0; j < 256; ++j) {
+                    values[i*256 + j] = ggml_fp32_to_fp16(j <= n_kv - 128 + i ? 0.0f : -INFINITY);
+                }
+            }
+            GGML_ASSERT(llm_graph_input_attn_kv::causal_mask_seq_len(mask, 128) == n_kv);
+            inp.update_causal_mask_hint();
+            GGML_ASSERT(attn->op_params[5] == n_kv);
+            for (float invalid : {-INFINITY, NAN, 1.0f}) {
+                values[0] = ggml_fp32_to_fp16(invalid);
+                GGML_ASSERT(llm_graph_input_attn_kv::causal_mask_seq_len(mask, 128) == 0);
+                inp.update_causal_mask_hint();
+                GGML_ASSERT(attn->op_params[5] == 0);
+            }
+            values[0] = ggml_fp32_to_fp16(0.0f);
+        }
+        ggml_set_zero(mask);
+        GGML_ASSERT(llm_graph_input_attn_kv::causal_mask_seq_len(mask, 128) == 0);
+        GGML_ASSERT(llm_graph_input_attn_kv::causal_mask_seq_len(mask, 0) == 0);
     }
 
     {

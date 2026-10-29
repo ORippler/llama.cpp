@@ -377,6 +377,9 @@ public:
 
 class llm_graph_input_attn_kv : public llm_graph_input_i {
 public:
+    static int32_t causal_mask_seq_len(const ggml_tensor * mask, int64_t n_queries);
+    void update_causal_mask_hint();
+
     llm_graph_input_attn_kv(
             const llama_hparams & hparams,
             const llama_cparams & cparams,
@@ -398,6 +401,8 @@ public:
     ggml_tensor * self_v_idxs = nullptr; // I64 [n_batch] or [n_batch*n_embd_v_gqa]
 
     llm_attn_mask self_attn_mask;
+
+    std::vector<ggml_tensor *> flash_attn;
 
     // note: assumes v_rot^2 == I
     std::vector<ggml_tensor *> self_k_rot;
@@ -1343,7 +1348,8 @@ struct llm_graph_context {
             ggml_tensor * v_mla,   // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
                 int64_t   n_kv_max,
                   float   kq_scale,
-                    int   il) const;
+                    int   il,
+            ggml_tensor ** flash_attn = nullptr) const;
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 

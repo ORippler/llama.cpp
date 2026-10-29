@@ -676,6 +676,44 @@ void llm_graph_input_attn_no_cache::set_input(const llama_ubatch * ubatch) {
     }
 }
 
+int32_t llm_graph_input_attn_kv::causal_mask_seq_len(const ggml_tensor * mask, int64_t n_queries) {
+    if (!mask || !mask->data || mask->type != GGML_TYPE_F16 || mask->ne[2] != 1 || mask->ne[3] != 1 ||
+        mask->ne[0] > INT32_MAX || n_queries <= 0 || n_queries > mask->ne[1]) {
+        return 0;
+    }
+
+    const auto * data = (const ggml_fp16_t *) mask->data;
+    const int64_t stride = mask->nb[1]/sizeof(ggml_fp16_t);
+    const auto * last = data + (n_queries - 1)*stride;
+    const ggml_fp16_t keep = ggml_fp32_to_fp16(0.0f);
+    const ggml_fp16_t drop = ggml_fp32_to_fp16(-INFINITY);
+    int32_t n_kv = 0;
+    while (n_kv < mask->ne[0] && last[n_kv] == keep) {
+        ++n_kv;
+    }
+    if (n_kv < n_queries) {
+        return 0;
+    }
+    for (int64_t i = 0; i < n_queries; ++i) {
+        const auto * row = data + i*stride;
+        const int64_t visible = n_kv - n_queries + i + 1;
+        if (!std::all_of(row, row + visible, [keep](ggml_fp16_t x) { return x == keep; }) ||
+            !std::all_of(row + visible, row + mask->ne[0], [drop](ggml_fp16_t x) { return x == drop; })) {
+            return 0;
+        }
+    }
+    return n_kv;
+}
+
+void llm_graph_input_attn_kv::update_causal_mask_hint() {
+    if (!flash_attn.empty()) {
+        const int32_t n_kv = causal_mask_seq_len(self_attn_mask.raw, flash_attn.front()->src[0]->ne[1]);
+        for (auto * attn : flash_attn) {
+            ggml_flash_attn_ext_set_causal_seq_len(attn, n_kv);
+        }
+    }
+}
+
 void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
     // the idxs are left unallocated when the KV cache is bypassed during training
     if (self_k_idxs && self_k_idxs->buffer) {
@@ -689,6 +727,9 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
     // (e.g. DFlash's KV-injection pass)
     if (self_attn_mask.raw && self_attn_mask.raw->buffer) {
         mctx->set_input_attn_mask(self_attn_mask, ubatch, cparams.causal_attn);
+#ifdef GGML_USE_CUDA_FLASHINFER
+        update_causal_mask_hint();
+#endif
     }
 }
 
@@ -1248,6 +1289,9 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
 
     // kv_rows and the mask stay unallocated if all attention layers have their own (e.g. qwen4exp QSA)
     mctx->get_attn()->set_input_attn_mask(inp_attn->self_attn_mask, ubatch, cparams.causal_attn);
+#ifdef GGML_USE_CUDA_FLASHINFER
+    inp_attn->update_causal_mask_hint();
+#endif
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
@@ -3181,7 +3225,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * v_mla,
              int64_t   n_kv_max,
                float   kq_scale,
-                 int   il) const {
+                 int   il,
+        ggml_tensor ** flash_attn) const {
     const bool v_trans = v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
@@ -3222,6 +3267,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         } else {
             cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
                                       hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
+        }
+        if (flash_attn && !kv_rows) {
+            *flash_attn = cur;
         }
         res->add_fused_node({kv_rows ? LLM_FUSED_OP_FLASH_ATTN_KV_ROWS : LLM_FUSED_OP_FLASH_ATTN, cur, il});
 
@@ -3533,7 +3581,14 @@ ggml_tensor * llm_graph_context::build_attn(
     const auto & kq_mask = inp->self_attn_mask.raw;
     const auto & kv_rows = inp->self_attn_mask.rows;
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, kv_rows, sinks, v_mla, 0, kq_scale, il);
+    ggml_tensor * flash_attn = nullptr;
+    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, kv_rows, sinks, v_mla, 0, kq_scale, il, &flash_attn);
+#ifdef GGML_USE_CUDA_FLASHINFER
+    if (flash_attn && q->ne[2] >= 128 && q->ne[1] == 24 && q->ne[0] == 256 &&
+        k->type == GGML_TYPE_F8_E4M3 && v->type == GGML_TYPE_F8_E4M3) {
+        inp->flash_attn.push_back(flash_attn);
+    }
+#endif
     cur = build_attn_scale_kv_output(ctx0, mctx_cur, cur, il);
     cb(cur, "kqv_out", il);
 

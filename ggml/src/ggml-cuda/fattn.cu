@@ -4,6 +4,7 @@
 #include "fattn-tile.cuh"
 #include "fattn-vec.cuh"
 #include "fattn.cuh"
+#include "fattn-flashinfer.cuh"
 
 #if !defined(GGML_USE_MUSA)
 
@@ -815,11 +816,23 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
     const ggml_cuda_flash_attn_ext_f16_extra_data f16_extra =
         ggml_cuda_flash_attn_ext_get_f16_extra_data(dst, need_f16_K, need_f16_V);
 
-    return f16_extra.end - (uintptr_t) dst->data;
+    size_t size = f16_extra.end - (uintptr_t) dst->data;
+#ifdef GGML_CUDA_FLASHINFER
+    // Input hints can change after allocation, so reserve both execution paths.
+    if (ggml_cuda_flashinfer_candidate(device, dst)) {
+        size = std::max(size, ggml_cuda_flashinfer_get_alloc_size(dst));
+    }
+#endif
+    return size;
 }
 
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
+#ifdef GGML_CUDA_FLASHINFER
+    if (ggml_cuda_flashinfer(ctx, dst)) {
+        return;
+    }
+#endif
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("fatal error");
