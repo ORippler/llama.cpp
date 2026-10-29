@@ -1,5 +1,8 @@
 #include "llama-kv-cache.h"
 #include "llama-model.h"
+#include "llama-graph.h"
+
+#include <limits>
 
 #include <numeric>
 #include <string>
@@ -115,19 +118,19 @@ int main() {
                 false, false, true, 32, 2, 0, LLAMA_SWA_TYPE_NONE, nullptr, nullptr, nullptr, nullptr);
 
         // returns the first cell that takes the tokens
-        auto add = [&](llama_seq_id seq_id, llama_pos p0, uint32_t n) {
+        auto add = [&](llama_seq_id seq_id, llama_pos p0, uint32_t n, int32_t expected_prefix = 0, uint32_t n_pos = 1) {
             std::vector<llama_token>    token(n, 1);
-            std::vector<llama_pos>      pos(n);
+            std::vector<llama_pos>      pos(n*n_pos);
             std::vector<int32_t>        n_seq_id(n, 1);
             std::vector<llama_seq_id *> seq_ids(n, &seq_id);
-            std::iota(pos.begin(), pos.end(), p0);
+            std::iota(pos.begin(), pos.begin() + n, p0);
 
             llama_ubatch ubatch = {};
             ubatch.n_tokens     = n;
             ubatch.n_seq_tokens = n;
             ubatch.n_seqs       = 1;
             ubatch.n_seqs_unq   = 1;
-            ubatch.n_pos        = 1;
+            ubatch.n_pos        = n_pos;
             ubatch.token        = token.data();
             ubatch.pos          = pos.data();
             ubatch.n_seq_id     = n_seq_id.data();
@@ -137,11 +140,29 @@ int main() {
             const auto sinfo = kv.find_slot(ubatch, false);
             GGML_ASSERT(!sinfo.empty());
             kv.apply_ubatch(sinfo, ubatch);
+            const uint32_t n_kv = kv.get_n_kv(sinfo);
+            GGML_ASSERT(kv.get_causal_prefix(ubatch, sinfo, n_kv) == expected_prefix);
+            if (expected_prefix > 0) {
+                ggml_context_ptr ctx(ggml_init({ggml_tensor_overhead(), nullptr, true}));
+                llm_attn_mask mask;
+                mask.raw = ggml_new_tensor_2d(ctx.get(), GGML_TYPE_F16, n_kv, n);
+                ggml_backend_buffer_ptr buf(ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), ggml_backend_cpu_buffer_type()));
+                GGML_ASSERT(buf);
+                kv.set_input_attn_mask(mask, &ubatch, true);
+                const auto * values = static_cast<const ggml_fp16_t *>(mask.raw->data);
+                for (uint32_t i = 0; i < n; ++i) {
+                    for (uint32_t j = 0; j < n_kv; ++j) {
+                        const float expected = j <= uint32_t(expected_prefix) - n + i
+                            ? 0.0f : -std::numeric_limits<float>::infinity();
+                        GGML_ASSERT(ggml_fp16_to_fp32(values[i*n_kv + j]) == expected);
+                    }
+                }
+            }
 
             return sinfo.head();
         };
 
-        GGML_ASSERT(add(0, 0, 8) == 0);
+        GGML_ASSERT(add(0, 0, 8, 8) == 0);
         GGML_ASSERT(add(1, 0, 4) == 8);
 
         // the tail of sequence 0, the other sequence keeps its cells
@@ -150,7 +171,7 @@ int main() {
         GGML_ASSERT(kv.seq_pos_min(1) == 0 && kv.seq_pos_max(1) == 3);
 
         // the next tokens go to the lowest freed cell
-        GGML_ASSERT(add(0, 5, 2) == 5);
+        GGML_ASSERT(add(0, 5, 2, 7) == 5);
 
         // p1 is not part of the range
         GGML_ASSERT(kv.seq_rm(0, -1, 2));
@@ -173,6 +194,23 @@ int main() {
         add(0, 5, 1);
         GGML_ASSERT(kv.seq_rm(0, 5, 6));
         GGML_ASSERT(kv.seq_pos_max(0) == 4);
+
+        kv.clear(false);
+        GGML_ASSERT(add(0, 0, 4, 4) == 0);
+        GGML_ASSERT(add(0, 4, 1, 5) == 4);
+        // This query has a duplicate visible position in the preceding cells.
+        GGML_ASSERT(add(0, 4, 1) == 5);
+
+        kv.clear(false);
+        GGML_ASSERT(add(0, 0, 4, 4) == 0);
+        GGML_ASSERT(add(0, 8, 1, 5) == 4);
+        GGML_ASSERT(kv.seq_rm(0, 3, 4));
+        // A future cell after the query slot is outside the visible prefix.
+        GGML_ASSERT(add(0, 3, 1, 4) == 3);
+
+        kv.clear(false);
+        GGML_ASSERT(add(0, 0, 4, 4, 4) == 0);
+        GGML_ASSERT(add(0, 4, 2, 6, 4) == 4);
     }
 
     llama_backend_free();
