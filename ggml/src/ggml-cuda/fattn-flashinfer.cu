@@ -2,47 +2,33 @@
 #include "fattn-flashinfer.cuh"
 #include "convert.cuh"
 
-#define CUTE_DSL_CUDA_ERROR_CHECK(err) CUDA_CHECK(err)
-#include "ggml_flashinfer_fp8.h"
+#include <tvm/ffi/container/tensor.h>
+#include <tvm/ffi/extra/c_env_api.h>
+#include <tvm/ffi/extra/module.h>
+#include <tvm/ffi/function.h>
 
 struct ggml_cuda_flashinfer_state {
-    ggml_flashinfer_fp8_Kernel_Module_t module = {};
-    bool loaded[GGML_CUDA_MAX_DEVICES] = {};
+    tvm::ffi::Optional<tvm::ffi::Module> module;
+    tvm::ffi::Function run;
 
     ggml_cuda_flashinfer_state() {
-        cudaLibrary_t * library = &module.module;
-        cudaError_t status = cudaSuccess;
-        struct {
-            cudaLibrary_t ** library;
-            cudaError_t * status;
-        } init = { &library, &status };
-        _mlir_ggml_flashinfer_fp8_cuda_init((void **) &init);
-        CUDA_CHECK(status);
-    }
-
-    void load(int device) {
-        if (loaded[device]) {
-            return;
+        const char * path = std::getenv("GGML_CUDA_FLASHINFER_LIBRARY");
+        try {
+            module = tvm::ffi::Module::LoadFromFile(path ? path : GGML_CUDA_FLASHINFER_LIBRARY);
+            auto function = module.value()->GetFunction("ggml_flashinfer_fp8_v1");
+            if (!function.has_value()) {
+                GGML_LOG_WARN("ggml_cuda_flashinfer: library does not export ggml_flashinfer_fp8_v1\n");
+                return;
+            }
+            run = function.value();
+            GGML_LOG_INFO("ggml_cuda_flashinfer: loaded TVM FFI FP8 prefill library\n");
+        } catch (const std::exception & e) {
+            GGML_LOG_WARN("ggml_cuda_flashinfer: TVM FFI unavailable: %s\n", e.what());
         }
-        cudaLibrary_t * library = &module.module;
-        cudaError_t status = cudaSuccess;
-        struct {
-            cudaLibrary_t ** library;
-            int32_t * device;
-            cudaError_t * status;
-        } load = { &library, &device, &status };
-        _mlir_ggml_flashinfer_fp8_cuda_load_to_device((void **) &load);
-        CUDA_CHECK(status);
-        loaded[device] = true;
-        GGML_LOG_INFO("ggml_cuda_flashinfer: loaded FP8 prefill kernel for CUDA%d\n", device);
-    }
-
-    ~ggml_cuda_flashinfer_state() {
-        CUDA_CHECK(cudaLibraryUnload(module.module));
     }
 };
 
-static std::shared_ptr<ggml_cuda_flashinfer_state> flashinfer_state(int device) {
+static std::shared_ptr<ggml_cuda_flashinfer_state> flashinfer_state() {
     static std::mutex mutex;
     static std::weak_ptr<ggml_cuda_flashinfer_state> shared;
     std::lock_guard<std::mutex> lock(mutex);
@@ -51,9 +37,21 @@ static std::shared_ptr<ggml_cuda_flashinfer_state> flashinfer_state(int device) 
         state = std::make_shared<ggml_cuda_flashinfer_state>();
         shared = state;
     }
-    state->load(device);
     return state;
 }
+
+struct flashinfer_stream_guard {
+    int device;
+    TVMFFIStreamHandle previous;
+
+    flashinfer_stream_guard(int device, cudaStream_t stream) : device(device) {
+        GGML_ASSERT(TVMFFIEnvSetStream(kDLCUDA, device, stream, &previous) == 0);
+    }
+
+    ~flashinfer_stream_guard() {
+        GGML_ASSERT(TVMFFIEnvSetStream(kDLCUDA, device, previous, nullptr) == 0);
+    }
+};
 
 bool ggml_cuda_flashinfer_candidate(int device, const ggml_tensor * dst) {
     static const bool disabled = std::getenv("GGML_CUDA_DISABLE_FLASHINFER") != nullptr;
@@ -120,7 +118,11 @@ bool ggml_cuda_flashinfer(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     }
     if (!ctx.flashinfer) {
         // The first uncaptured evaluation loads the library before CUDA graph capture.
-        ctx.flashinfer = flashinfer_state(ctx.device);
+        ctx.flashinfer = flashinfer_state();
+    }
+
+    if (!ctx.flashinfer->run.defined()) {
+        return false;
     }
 
     const size_t n = ggml_nelements(dst);
@@ -133,16 +135,23 @@ bool ggml_cuda_flashinfer(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         (const char *) q->data, packed_q, seq_lens, n_queries, n_kv, q->nb[1], q->nb[2]);
     CUDA_CHECK(cudaGetLastError());
 
-    ggml_flashinfer_fp8_Tensor_q_t q_arg = {packed_q, {n_queries}};
-    ggml_flashinfer_fp8_Tensor_k_t k_arg = {k->data, {n_kv}};
-    ggml_flashinfer_fp8_Tensor_v_t v_arg = {v->data, {n_kv}};
-    ggml_flashinfer_fp8_Tensor_o_t o_arg = {output, {n_queries}};
-    ggml_flashinfer_fp8_Tensor_cu_q_t cu_q = {seq_lens};
-    ggml_flashinfer_fp8_Tensor_cu_k_t cu_k = {seq_lens + 2};
+    int64_t q_shape[] = {n_queries, 24, 256};
+    int64_t kv_shape[] = {n_kv, 4, 256};
+    int64_t q_strides[] = {24*256, 256, 1};
+    int64_t kv_strides[] = {4*256, 256, 1};
+    int64_t cu_shape[] = {2};
+    int64_t cu_strides[] = {1};
+    const DLDevice device = {kDLCUDA, ctx.device};
+    const DLDataType fp8 = {kDLFloat8_e4m3fn, 8, 1};
+    DLTensor q_arg = {packed_q, device, 3, fp8, q_shape, q_strides, 0};
+    DLTensor k_arg = {k->data, device, 3, fp8, kv_shape, kv_strides, 0};
+    DLTensor v_arg = {v->data, device, 3, fp8, kv_shape, kv_strides, 0};
+    DLTensor o_arg = {output, device, 3, {kDLBfloat, 16, 1}, q_shape, q_strides, 0};
+    DLTensor cu_q = {seq_lens, device, 1, {kDLInt, 32, 1}, cu_shape, cu_strides, 0};
+    DLTensor cu_k = {seq_lens + 2, device, 1, {kDLInt, 32, 1}, cu_shape, cu_strides, 0};
     const float scale_log2 = ggml_get_op_params_f32(dst, 0)*1.4426950408889634f;
-    const int status = cute_dsl_ggml_flashinfer_fp8_wrapper(
-        &ctx.flashinfer->module, &q_arg, &k_arg, &v_arg, &o_arg, &cu_q, &cu_k, scale_log2, n_queries, ctx.stream());
-    GGML_ASSERT(status == 0);
+    flashinfer_stream_guard stream_guard(ctx.device, ctx.stream());
+    ctx.flashinfer->run(&q_arg, &k_arg, &v_arg, &o_arg, &cu_q, &cu_k, scale_log2, n_queries);
     ggml_get_to_fp32_cuda(GGML_TYPE_BF16)(output, (float *) dst->data, n, ctx.stream());
     return true;
 }

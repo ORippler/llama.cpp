@@ -1,5 +1,6 @@
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -9,9 +10,10 @@ FLASHINFER_COMMIT = "8ec9464ce81d81c9e3670aa09acd1a8780f83695"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Export the SM120 FP8 prefill kernel to C")
+    parser = argparse.ArgumentParser(description="Export the SM120 FP8 prefill kernel to a TVM FFI library")
     parser.add_argument("--source-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--cc", default="cc", help="Host linker driver")
     args = parser.parse_args()
     revision = subprocess.check_output(
         ["git", "-C", str(args.source_dir), "rev-parse", "HEAD"], text=True).strip()
@@ -44,9 +46,18 @@ def main():
     o = make_fake_compact_tensor(cutlass.BFloat16, (q_len, 24, 256), stride_order=(2, 1, 0), assumed_align=16)
     cu = make_fake_compact_tensor(cutlass.Int32, (2,), assumed_align=4)
     compiled = cute.compile(launch, q, k, k, o, cu, cu, cutlass.Float32(1.0), cutlass.Int32(1),
-                            make_fake_stream(), options="--gpu-arch sm_120a")
+                            make_fake_stream(use_tvm_ffi_env_stream=True), options="--gpu-arch sm_120a --enable-tvm-ffi")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    compiled.export_to_c(str(args.output_dir), "ggml_flashinfer_fp8")
+    object_path = args.output_dir / "ggml_flashinfer_fp8.o"
+    compiled.export_to_c(str(object_path), function_name="ggml_flashinfer_fp8_v1")
+    libraries = [Path(lib) for lib in cute.runtime.find_runtime_libraries(enable_tvm_ffi=True)]
+    for library in libraries:
+        target = args.output_dir / library.name
+        if library.resolve() != target.resolve():
+            shutil.copy2(library, target)
+    subprocess.run([args.cc, "-shared", "-o", str(args.output_dir / "libggml_flashinfer_fp8.so"),
+                    str(object_path), f"-L{args.output_dir}", "-Wl,-rpath,$ORIGIN",
+                    *[f"-l:{lib.name}" for lib in libraries]], check=True)
 
 
 if __name__ == "__main__":
