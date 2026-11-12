@@ -1507,6 +1507,15 @@ struct ggml_cuda_mm_fusion_args_host {
     const ggml_tensor * shared_gate = nullptr;
     ggml_tensor * shared_dst = nullptr;
 };
+
+struct ggml_cuda_nvfp4_layout {
+    uint8_t * data = nullptr;
+    uint8_t * scales = nullptr;
+    int64_t k = 0;
+    int64_t n = 0;
+    int64_t experts = 0;
+};
+
 struct ggml_cuda_mm_fusion_args_device {
     const void * x_bias = nullptr;
     const void * gate = nullptr;
@@ -1519,6 +1528,10 @@ struct ggml_cuda_mm_fusion_args_device {
     const void * shared_gate = nullptr;
     float * shared_dst = nullptr;
     uint32_t shared_stride_col_dst = 0;
+    ggml_cuda_nvfp4_layout nvfp4_x;
+    ggml_cuda_nvfp4_layout nvfp4_gate;
+    ggml_cuda_nvfp4_layout nvfp4_shared_up;
+    ggml_cuda_nvfp4_layout nvfp4_shared_gate;
 };
 
 struct ggml_cuda_kernel_launch_params {

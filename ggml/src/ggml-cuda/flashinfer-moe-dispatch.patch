@@ -1,0 +1,19 @@
+--- moe_dispatch.py
++++ moe_dispatch_ggml.py
+@@ -2850,0 +2851,2 @@
++        b_gate: cute.Tensor,
++        sfb_gate_ptr: cute.Pointer,
+@@ -2932,0 +2935,2 @@
++            b_gate,
++            sfb_gate_ptr,
+@@ -3170,2 +3174,2 @@
+-        # (up at batch 2e, gate at 2e+1; FC2 reduces over I_true).
+-        w13_fake_shape = (branch_major_extent, k, 2 * E)
++        # (separate up and gate tensors; FC2 reduces over I_true).
++        w13_fake_shape = (branch_major_extent, k, E)
+@@ -3204 +3208 @@
+-        alpha_dtype, (E,), assumed_align=16
++        alpha_dtype, (2 * E,), assumed_align=16
+@@ -3241,0 +3246,2 @@
++            b_w13_fake,
++            sfb_w13_fake,

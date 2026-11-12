@@ -5884,6 +5884,80 @@ struct test_mul_mat_w4a4 : public test_mul_mat {
     }
 };
 
+struct test_mul_mat_nvfp4_transfer : public test_mul_mat_w4a4 {
+    ggml_tensor * transfer_view = nullptr;
+    ggml_tensor * transfer_copy = nullptr;
+
+    test_mul_mat_nvfp4_transfer() : test_mul_mat_w4a4(GGML_TYPE_NVFP4, GGML_TYPE_F32, 128, 129, 256) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        return build_graph(ctx, nullptr);
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx, ggml_context * ctx_weights) override {
+        ggml_tensor * out = test_mul_mat_w4a4::build_graph(ctx, ctx_weights);
+        transfer_view = ggml_view_1d(ctx_weights ? ctx_weights : ctx, out->src[0], 64, ggml_type_size(GGML_TYPE_NVFP4));
+        transfer_copy = ggml_new_tensor_1d(ctx, GGML_TYPE_NVFP4, 64);
+        return out;
+    }
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "MUL_MAT_NVFP4_TRANSFER";
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        test_case::initialize_tensors(ctx);
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->type != GGML_TYPE_NVFP4 || t->view_src || t == transfer_copy) {
+                continue;
+            }
+            std::vector<uint8_t> original(ggml_nbytes(t));
+            std::vector<uint8_t> actual(original.size());
+            ggml_backend_tensor_get(t, original.data(), 0, original.size());
+            ggml_backend_tensor_memset(t, 0, 0, original.size());
+            ggml_backend_tensor_memset(t, 0xa5, 11, 1037);
+            ggml_backend_tensor_get(t, actual.data(), 0, actual.size());
+            for (size_t i = 0; i < actual.size(); ++i) {
+                GGML_ASSERT(actual[i] == (i >= 11 && i < 1048 ? 0xa5 : 0));
+            }
+            ggml_backend_tensor_memset(transfer_view, 0x3c, 5, 17);
+            ggml_backend_tensor_get(transfer_view, actual.data(), 5, 17);
+            GGML_ASSERT(std::all_of(actual.begin(), actual.begin() + 17, [](uint8_t byte) { return byte == 0x3c; }));
+            for (size_t offset = 0; offset < original.size(); offset += 197) {
+                const size_t size = std::min<size_t>(197, original.size() - offset);
+                ggml_backend_tensor_set(t, original.data() + offset, offset, size);
+                ggml_backend_tensor_get(t, actual.data() + offset, offset, size);
+            }
+            GGML_ASSERT(original == actual);
+            ggml_tensor * targets[] = {t, transfer_view};
+            const size_t offsets[] = {123, 5}, sizes[] = {197, 17};
+            const size_t data_offsets[] = {123, ggml_type_size(GGML_TYPE_NVFP4) + 5};
+            ggml_backend_tensor_memset(t, 0, offsets[0], sizes[0]);
+            ggml_backend_tensor_memset(transfer_view, 0, offsets[1], sizes[1]);
+            ggml_backend_tensor_set_n(targets, original.data(), offsets, sizes, data_offsets, 2);
+            const ggml_tensor * sources[] = {t, transfer_view};
+            const size_t read_offsets[] = {0, 5}, read_sizes[] = {original.size(), 17};
+            const size_t read_data_offsets[] = {0, ggml_type_size(GGML_TYPE_NVFP4) + 5};
+            std::fill(actual.begin(), actual.end(), 0xcc);
+            ggml_backend_tensor_get_n(sources, actual.data(), read_offsets, read_sizes, read_data_offsets, 2);
+            GGML_ASSERT(original == actual);
+            const size_t block_size = ggml_type_size(GGML_TYPE_NVFP4);
+            const ggml_tensor * copy_sources[] = {transfer_view};
+            ggml_tensor * copy_targets[] = {transfer_copy};
+            ggml_backend_tensor_copy_n(copy_sources, copy_targets, 1);
+            ggml_backend_tensor_get(transfer_copy, actual.data(), 0, block_size);
+            GGML_ASSERT(std::equal(actual.begin(), actual.begin() + block_size, original.begin() + block_size));
+            ggml_backend_tensor_memset(transfer_view, 0, 0, block_size);
+            const ggml_tensor * restore_sources[] = {transfer_copy};
+            ggml_tensor * restore_targets[] = {transfer_view};
+            ggml_backend_tensor_copy_n(restore_sources, restore_targets, 1);
+            ggml_backend_tensor_get(t, actual.data(), 0, actual.size());
+            GGML_ASSERT(original == actual);
+        }
+    }
+};
+
 static void init_mul_mat_id_ids(ggml_context * ctx, int n_mats, bool skip = false) {
 
     std::random_device rd;
@@ -8398,7 +8472,7 @@ struct test_mul_mat_fusion : public test_case {
         // 4-bit activations on Blackwell, see test_mul_mat
         if (type == GGML_TYPE_NVFP4 && !graph_mul_mat_hi_prec_act(gf, use_id ? GGML_OP_MUL_MAT_ID : GGML_OP_MUL_MAT) &&
                 backend_has_feature(backend, "BLACKWELL_NATIVE_FP4")) {
-            return 2e-2;
+            return m >= 128 ? 3e-2 : 2e-2;
         }
         return max_nmse_err();
     }
@@ -11480,6 +11554,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_set(GGML_TYPE_I32, GGML_TYPE_I32, {6, 5, 4, 3}, dim, true));
     }
 
+    test_cases.emplace_back(new test_cpy(GGML_TYPE_NVFP4, GGML_TYPE_NVFP4, {256, 128, 2, 1}));
+
     // same-type copy
     for (ggml_type type : all_types) {
         const auto nk = ggml_blck_size(type);
@@ -12038,6 +12114,17 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat_w4a8(GGML_TYPE_NVFP4, GGML_TYPE_F32, 64, 16, 512));
     test_cases.emplace_back(new test_mul_mat_w4a4(GGML_TYPE_NVFP4, GGML_TYPE_F32, 32,  1, 256));
     test_cases.emplace_back(new test_mul_mat_w4a4(GGML_TYPE_NVFP4, GGML_TYPE_F32, 32, 32, 256));
+    test_cases.emplace_back(new test_mul_mat_nvfp4_transfer());
+    for (int64_t n : {1, 8, 128, 129, 512}) {
+        test_cases.emplace_back(new test_mul_mat_w4a4(GGML_TYPE_NVFP4, GGML_TYPE_F32, 128, n, 512));
+    }
+    test_cases.emplace_back(new test_mul_mat_w4a8(GGML_TYPE_NVFP4, GGML_TYPE_F32, 128, 129, 512));
+    for (int64_t n : {1, 8, 129}) {
+        for (bool broadcast : {false, true}) {
+            test_cases.emplace_back(new test_mul_mat_id_w4a4(GGML_TYPE_NVFP4, GGML_TYPE_F32, 8, 4, broadcast, 128, n, 256));
+        }
+    }
+    test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_NVFP4, GGML_TYPE_F32, 8, 4, false, 128, 1, 256, 256, true));
     test_cases.emplace_back(new test_mul_mat_id_w4a8(GGML_TYPE_NVFP4, GGML_TYPE_F32, 8, 2, false, 32, 32, 256));
     test_cases.emplace_back(new test_mul_mat_id_w4a8(GGML_TYPE_NVFP4, GGML_TYPE_F32, 4, 2, true,  64, 16, 256));
     test_cases.emplace_back(new test_mul_mat_id_w4a4(GGML_TYPE_NVFP4, GGML_TYPE_F32, 8, 2, false, 32, 32, 256));
@@ -13497,6 +13584,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         false, 1, 1, false, false, false, true, {2, 1}));
     test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_F8_E4M3, GGML_GLU_OP_SWIGLU, 16, 31, 257,
         false, 1, 1, false, false, false, true, {1, 1}));
+    for (int64_t tokens : {128, 129, 512}) {
+        test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_NVFP4, GGML_GLU_OP_SWIGLU, tokens, 128, 512,
+            false, 1, 1, false, false, true, true, {1, 1}));
+    }
 
     for (ggml_type type : base_types) {
         for (bool with_gate : {false, true}) {

@@ -1,4 +1,5 @@
 #include "quantize.cuh"
+#include "nvfp4-flashinfer.cuh"
 #include <cstdint>
 
 #if defined(BLACKWELL_MMA_AVAILABLE)
@@ -124,11 +125,11 @@ __device__ __forceinline__ uint8_t compute_e8m0_scale(float amax) {
 }
 
 // scatter: grid over tokens, quantize once, write to all the token's compact rows
-template <bool scatter, bool use_aligned_float8>
+template <bool scatter, bool use_aligned_float8, bool flashinfer = false>
 static __global__ void quantize_mmq_nvfp4(
         const float * __restrict__ x, const int32_t * __restrict__ ids, void * __restrict__ vy, float * __restrict__ scale,
         const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
-        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int n_expert_used) {
+        const int64_t ne0, const int64_t ne1, const int64_t ne2, const int n_expert_used, uint8_t * flashinfer_sf = nullptr) {
 #if defined(BLACKWELL_MMA_AVAILABLE)
 
     int64_t base_idx;
@@ -304,7 +305,22 @@ static __global__ void quantize_mmq_nvfp4(
         }
 #endif // CUDART_VERSION >= 12080
 
-        if constexpr (scatter) {
+        if constexpr (flashinfer) {
+            uint8_t original[8];
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                original[j] = q0 >> (8 * j);
+                original[j + 4] = q1 >> (8 * j);
+            }
+            uint8_t * packed = (uint8_t *) vy + blockIdx.x * (ne0 / 2) + isb * 8;
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                const int shift = j < 4 ? 0 : 4;
+                packed[j] = ((original[(2 * j) % 8] >> shift) & 15) |
+                    (((original[(2 * j + 1) % 8] >> shift) & 15) << 4);
+            }
+            flashinfer_sf[ggml_cuda_nvfp4_scale_index(blockIdx.x, isb, ne0, GGML_PAD(ne1, 128))] = fp8_code;
+        } else if constexpr (scatter) {
 #pragma unroll
             for (int slot = 0; slot < n_expert_used; ++slot) {
                 const int64_t i = ids[(int64_t) blockIdx.x * n_expert_used + slot];
@@ -888,4 +904,13 @@ void quantize_mmq_fp4_cuda(
 
         quantize_mmq_mxfp4<false><<<num_blocks, block_size, 0, stream>>>(x, ids, vy, ne00, s01, s02, s03, ne0, ne1, ne2, /*n_expert_used=*/0);
     }
+}
+
+void quantize_flashinfer_nvfp4_cuda(const float * x, uint8_t * data, uint8_t * sf, float * row_scale,
+        int64_t k, int64_t m, int64_t stride, cudaStream_t stream) {
+    GGML_ASSERT(k > 0 && k % 64 == 0 && m > 0);
+    CUDA_CHECK(cudaMemsetAsync(sf, 0, GGML_PAD(m, 128) * k / 16, stream));
+    quantize_mmq_nvfp4<false, false, true><<<m, CUDA_QUANTIZE_BLOCK_SIZE_MMQ, 0, stream>>>(
+        x, nullptr, data, row_scale, k, stride, 0, 0, k, m, 1, 0, sf);
+    CUDA_CHECK(cudaGetLastError());
 }

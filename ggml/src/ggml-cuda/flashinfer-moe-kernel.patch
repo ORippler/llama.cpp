@@ -1,0 +1,151 @@
+--- gated.py
++++ gated_ggml.py
+@@ -1693,2 +1693,2 @@
+-                        g = alpha_value * gate_slice[elem_idx]
+-                        u = alpha_value * up_slice[elem_idx]
++                        g = alpha_value[1] * gate_slice[elem_idx]
++                        u = alpha_value[0] * up_slice[elem_idx]
+@@ -2163,2 +2163,2 @@
+-                            g = alpha_value * gate_slice[elem_idx]
+-                            u = alpha_value * up_slice[elem_idx]
++                            g = alpha_value[1] * gate_slice[elem_idx]
++                            u = alpha_value[0] * up_slice[elem_idx]
+@@ -2866,2 +2866,2 @@
+-        up_batch_idx = task_expert_idx * Int32(2)
+-        gate_batch_idx = up_batch_idx + Int32(1)
++        up_batch_idx = task_expert_idx
++        gate_batch_idx = task_expert_idx
+@@ -2881 +2881 @@
+-            tBgB_w13_gate_nk = tBgB_w13[
++            tBgB_w13_gate_nk = tBgB_w13[1][
+@@ -2889 +2889 @@
+-            tBgB_w13_up_nk = tBgB_w13[
++            tBgB_w13_up_nk = tBgB_w13[0][
+@@ -2897 +2897 @@
+-            tBgSFB_w13_gate_nk = tBgSFB_w13[
++            tBgSFB_w13_gate_nk = tBgSFB_w13[1][
+@@ -2905 +2905 @@
+-            tBgSFB_w13_up_nk = tBgSFB_w13[
++            tBgSFB_w13_up_nk = tBgSFB_w13[0][
+@@ -2970 +2970 @@
+-                        tma_b_w13,
++                        tma_b_w13[1],
+@@ -2977 +2977 @@
+-                        tma_b_w13,
++                        tma_b_w13[0],
+@@ -2990 +2990 @@
+-                        tma_sfb_w13,
++                        tma_sfb_w13[1],
+@@ -2997 +2997 @@
+-                            tma_sfb_w13,
++                            tma_sfb_w13[0],
+@@ -3004 +3004 @@
+-                            tma_sfb_w13,
++                            tma_sfb_w13[0],
+@@ -3990,2 +3990,4 @@
+-        b_w13: cute.Tensor,  # [2*I_tp, K, E] (gated) or [I_tp, K, E] (relu2)
+-        sfb_w13_ptr: cute.Pointer,  # scale factors for w13
++        b_w13: cute.Tensor,  # [I_tp, K, E] up weights
++        sfb_w13_ptr: cute.Pointer,  # scale factors for up
++        b_gate: cute.Tensor,
++        sfb_gate_ptr: cute.Pointer,
+@@ -4032 +4034 @@
+-        # w13 is branch-major [I_true, K, 2E] (up at batch 2e, gate at 2e+1).
++        # Up and gate use separate [I_true, K, E] tensors.
+@@ -4044,0 +4047 @@
++        sfb_gate_tensor = cute.make_tensor(sfb_gate_ptr, sfb_w13_layout)
+@@ -4131 +4134 @@
+-        tma_b_w13, gB_w13 = self._dense_cls._make_tma_atoms_and_tensors(
++        tma_b_up, gB_up = self._dense_cls._make_tma_atoms_and_tensors(
+@@ -4136,0 +4140,6 @@
++        tma_b_gate, gB_gate = self._dense_cls._make_tma_atoms_and_tensors(
++            b_gate,
++            self.fc1_b_smem_layout_staged,
++            (self.fc1_tile_shape_mnk[1], self.fc1_tile_shape_mnk[2]),
++            1,
++        )
+@@ -4140 +4149 @@
+-        tma_sfb_w13, gSFB_w13 = self._dense_cls._make_tma_atoms_and_tensors(
++        tma_sfb_up, gSFB_up = self._dense_cls._make_tma_atoms_and_tensors(
+@@ -4146,0 +4156,9 @@
++        tma_sfb_gate, gSFB_gate = self._dense_cls._make_tma_atoms_and_tensors(
++            sfb_gate_tensor,
++            self.fc1_sfb_smem_layout_staged,
++            self.fc1_sfb_tile_shape_nk,
++            1,
++            internal_type=cutlass.Int16,
++        )
++        tma_b_w13, gB_w13 = (tma_b_up, tma_b_gate), (gB_up, gB_gate)
++        tma_sfb_w13, gSFB_w13 = (tma_sfb_up, tma_sfb_gate), (gSFB_up, gSFB_gate)
+@@ -4287,4 +4305,4 @@
+-        tma_b_w13: cute.CopyAtom,
+-        mB_w13: cute.Tensor,
+-        tma_sfb_w13: cute.CopyAtom,
+-        mSFB_w13: cute.Tensor,
++        tma_b_w13,
++        mB_w13,
++        tma_sfb_w13,
++        mSFB_w13,
+@@ -4336,2 +4354,4 @@
+-            cpasync.prefetch_descriptor(tma_b_w13)
+-            cpasync.prefetch_descriptor(tma_sfb_w13)
++            cpasync.prefetch_descriptor(tma_b_w13[0])
++            cpasync.prefetch_descriptor(tma_b_w13[1])
++            cpasync.prefetch_descriptor(tma_sfb_w13[0])
++            cpasync.prefetch_descriptor(tma_sfb_w13[1])
+@@ -4566 +4586 @@
+-            mB_w13,
++            mB_w13[0],
+@@ -4569,0 +4590,5 @@
++        gB_w13_tiled_gate = cute.local_tile(
++            mB_w13[1],
++            cute.slice_(self.fc1_tile_shape_mnk, (0, None, None)),
++            (None, None, None),
++        )
+@@ -4574 +4599,6 @@
+-            mSFB_w13,
++            mSFB_w13[0],
++            self.fc1_sfb_tile_shape_nk,
++            (None, None, None),
++        )
++        gSFB_w13_tiled_gate = cute.local_tile(
++            mSFB_w13[1],
+@@ -4640,2 +4670,2 @@
+-        tBsB_w13, tBgB_w13 = cpasync.tma_partition(
+-            tma_b_w13,
++        tBsB_w13, tBgB_gate = cpasync.tma_partition(
++            tma_b_w13[1],
+@@ -4645,4 +4675,4 @@
+-            cute.group_modes(gB_w13_tiled, 0, 2),
+-        )
+-        tBsB_w13_up, _tBgB_w13_up = cpasync.tma_partition(
+-            tma_b_w13,
++            cute.group_modes(gB_w13_tiled_gate, 0, 2),
++        )
++        tBsB_w13_up, tBgB_up = cpasync.tma_partition(
++            tma_b_w13[0],
+@@ -4654,2 +4684,2 @@
+-        tBsSFB_w13, tBgSFB_w13 = cpasync.tma_partition(
+-            tma_sfb_w13,
++        tBsSFB_w13, tBgSFB_gate = cpasync.tma_partition(
++            tma_sfb_w13[1],
+@@ -4659,4 +4689,4 @@
+-            cute.group_modes(gSFB_w13_tiled, 0, 2),
+-        )
+-        tBsSFB_w13_up, _tBgSFB_w13_up = cpasync.tma_partition(
+-            tma_sfb_w13,
++            cute.group_modes(gSFB_w13_tiled_gate, 0, 2),
++        )
++        tBsSFB_w13_up, tBgSFB_up = cpasync.tma_partition(
++            tma_sfb_w13[0],
+@@ -4669 +4699 @@
+-            tma_sfb_w13,
++            tma_sfb_w13[0],
+@@ -4674,0 +4705 @@
++        tBgB_w13 = (tBgB_up, tBgB_gate)
+@@ -4676 +4707 @@
+-        tBgSFB_w13 = cute.filter_zeros(tBgSFB_w13)
++        tBgSFB_w13 = (cute.filter_zeros(tBgSFB_up), cute.filter_zeros(tBgSFB_gate))
+@@ -4883 +4914 @@
+-                    alpha_value = alpha[task_expert_idx].to(cutlass.Float32)
++                    alpha_value = (alpha[2 * task_expert_idx].to(cutlass.Float32), alpha[2 * task_expert_idx + 1].to(cutlass.Float32))

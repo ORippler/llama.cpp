@@ -2,7 +2,7 @@
 
 List of GGML operations and backend support status.
 
-CUDA `FLASH_ATTN_EXT` has an optional SM120 FP8 prefill implementation. See [FlashInfer build options](build.md#experimental-flashinfer-fp8-prefill) for its shape and mask restrictions. The causal sequence length is a validated execution hint; other backends retain the explicit mask semantics.
+CUDA `FLASH_ATTN_EXT` has an optional SM120 FP8 prefill implementation. See [FlashInfer build options](build.md#experimental-flashinfer-prefill-on-sm120) for its shape and mask restrictions. The causal sequence length is a validated execution hint; other backends retain the explicit mask semantics. The same optional adapter provides NVFP4 prefill `MUL_MAT`, gate/up fusion, and a specialized routed MoE fusion. These require explicit runtime switches and retain the existing operation semantics and native fallbacks.
 
 ## How to add a backend to this table:
 
