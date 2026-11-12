@@ -11,6 +11,9 @@
 static_assert(MATRIX_ROW_PADDING %    CUDA_QUANTIZE_BLOCK_SIZE      == 0, "Risk of out-of-bounds access.");
 static_assert(MATRIX_ROW_PADDING % (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ) == 0, "Risk of out-of-bounds access.");
 
+void quantize_flashinfer_nvfp4_cuda(const float * x, uint8_t * data, uint8_t * sf, float * row_scale,
+        int64_t k, int64_t m, int64_t stride, cudaStream_t stream);
+
 void quantize_row_q8_1_cuda(
         const float * x, void * vy,
         int64_t ne00, int64_t s01, int64_t s02, int64_t s03,

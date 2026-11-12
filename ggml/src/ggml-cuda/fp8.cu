@@ -85,10 +85,9 @@ static void fp8_destroy_matmul(
     CUBLAS_CHECK(cublasLtMatmulDescDestroy(op_desc));
 }
 
-bool ggml_cuda_mul_mat_fp8(
-        ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst,
+static bool fp8_can_mul_mat(
+        int cc, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst,
         const ggml_tensor * weight_scale) {
-    const int cc = ggml_cuda_info().devices[ctx.device].cc;
     if (!fp8_mma_hardware_available(cc) || src0->type != GGML_TYPE_F8_E4M3 || src1->type != GGML_TYPE_F32 ||
             dst->type != GGML_TYPE_F32 || !ggml_is_contiguous(dst) || src0->ne[0] % 16 != 0 || src0->ne[1] % 16 != 0 ||
             src0->nb[0] != sizeof(uint8_t) || src0->nb[1] != (size_t) src0->ne[0] || src1->nb[0] != sizeof(float) ||
@@ -98,21 +97,21 @@ bool ggml_cuda_mul_mat_fp8(
 
     GGML_ASSERT(!weight_scale || (weight_scale->type == GGML_TYPE_F32 && ggml_is_contiguous(weight_scale) && ggml_nelements(weight_scale) == 1));
 
-    GGML_TENSOR_BINARY_OP_LOCALS
-    GGML_ASSERT(ne10 == ne00);
-    GGML_ASSERT(ne0 == ne01);
-    GGML_ASSERT(ne12 % ne02 == 0);
-    GGML_ASSERT(ne13 % ne03 == 0);
+    GGML_ASSERT(src1->ne[0] == src0->ne[0]);
+    GGML_ASSERT(dst->ne[0] == src0->ne[1]);
+    GGML_ASSERT(src1->ne[2] % src0->ne[2] == 0);
+    GGML_ASSERT(src1->ne[3] % src0->ne[3] == 0);
+    return true;
+}
 
+static void fp8_quantize(ggml_backend_cuda_context & ctx, const ggml_tensor * src1, uint8_t * src1_fp8, float * src1_scale) {
     cudaStream_t stream = ctx.stream();
     const int64_t ne_src1 = ggml_nelements(src1);
-    ggml_cuda_pool_alloc<uint8_t> src1_fp8(ctx.pool(), ne_src1);
-    ggml_cuda_pool_alloc<float> src1_scale(ctx.pool(), 1);
     ggml_cuda_pool_alloc<float> src1_amax(ctx.pool(), 1);
 
     const fp8_abs_src abs_src = {
-        (const float *) src1->data, ne10, ne11, ne12,
-        (int64_t) (nb11 / sizeof(float)), (int64_t) (nb12 / sizeof(float)), (int64_t) (nb13 / sizeof(float))
+        (const float *) src1->data, src1->ne[0], src1->ne[1], src1->ne[2],
+        (int64_t) (src1->nb[1] / sizeof(float)), (int64_t) (src1->nb[2] / sizeof(float)), (int64_t) (src1->nb[3] / sizeof(float))
     };
     const int reduce_blocks = std::min<int64_t>((ne_src1 + 255)/256, 1024);
     ggml_cuda_pool_alloc<float> reduce_tmp(ctx.pool(), reduce_blocks);
@@ -120,10 +119,16 @@ bool ggml_cuda_mul_mat_fp8(
     fp8_amax_final<<<1, 256, 0, stream>>>(reduce_tmp.ptr, reduce_blocks, src1_amax.ptr);
 
     quantize_fp8_e4m3<<<(ne_src1 + 255)/256, 256, 0, stream>>>(
-        (const float *) src1->data, src1_fp8.ptr, src1_amax.ptr, src1_scale.ptr, ne10, ne11, ne12, ne_src1,
-        nb11 / sizeof(float), nb12 / sizeof(float), nb13 / sizeof(float));
+        (const float *) src1->data, src1_fp8, src1_amax.ptr, src1_scale, src1->ne[0], src1->ne[1], src1->ne[2], ne_src1,
+        src1->nb[1] / sizeof(float), src1->nb[2] / sizeof(float), src1->nb[3] / sizeof(float));
     CUDA_CHECK(cudaGetLastError());
+}
 
+static bool fp8_mul_mat(
+        ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst,
+        const ggml_tensor * weight_scale, const uint8_t * src1_fp8, const float * src1_scale) {
+    GGML_TENSOR_BINARY_OP_LOCALS
+    cudaStream_t stream = ctx.stream();
     cublasLtMatmulDesc_t op_desc;
     cublasLtMatrixLayout_t a_desc;
     cublasLtMatrixLayout_t b_desc;
@@ -132,7 +137,7 @@ bool ggml_cuda_mul_mat_fp8(
     const cublasOperation_t trans_a = CUBLAS_OP_T;
     CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(trans_a)));
     CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(
-        op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &src1_scale.ptr, sizeof(src1_scale.ptr)));
+        op_desc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &src1_scale, sizeof(src1_scale)));
     if (weight_scale) {
         const float * scale_ptr = (const float *) weight_scale->data;
         CUBLAS_CHECK(cublasLtMatmulDescSetAttribute(
@@ -184,7 +189,7 @@ bool ggml_cuda_mul_mat_fp8(
     const float beta = 0.0f;
     for (int64_t i3 = 0; i3 < n_calls; ++i3) {
         const char * a = (const char *) src0->data + (i3/r3)*nb03;
-        const uint8_t * b = src1_fp8.ptr + i3*ne12*ne11*ne10;
+        const uint8_t * b = src1_fp8 + i3*ne12*ne11*ne10;
         float * d = (float *) ((char *) dst->data + i3*dst->nb[3]);
         CUBLAS_CHECK(cublasLtMatmul(ctx.cublaslt_handle(), op_desc, &alpha, a, a_desc, b, b_desc,
             &beta, d, d_desc, d, d_desc, &heuristic.algo, nullptr, 0, stream));
@@ -194,13 +199,39 @@ bool ggml_cuda_mul_mat_fp8(
     return true;
 }
 
+bool ggml_cuda_mul_mat_fp8_shared(
+        ggml_backend_cuda_context & ctx, const ggml_tensor * src1, const ggml_cuda_fp8_matmul * mats, int count) {
+    const int cc = ggml_cuda_info().devices[ctx.device].cc;
+    for (int i = 0; i < count; ++i) {
+        if (!fp8_can_mul_mat(cc, mats[i].src0, src1, mats[i].dst, mats[i].weight_scale)) {
+            return false;
+        }
+    }
+
+    ggml_cuda_pool_alloc<uint8_t> src1_fp8(ctx.pool(), ggml_nelements(src1));
+    ggml_cuda_pool_alloc<float> src1_scale(ctx.pool(), 1);
+    fp8_quantize(ctx, src1, src1_fp8.ptr, src1_scale.ptr);
+    for (int i = 0; i < count; ++i) {
+        if (!fp8_mul_mat(ctx, mats[i].src0, src1, mats[i].dst, mats[i].weight_scale, src1_fp8.ptr, src1_scale.ptr)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 #else
 
-bool ggml_cuda_mul_mat_fp8(
-        ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst,
-        const ggml_tensor * weight_scale) {
-    GGML_UNUSED_VARS(ctx, src0, src1, dst, weight_scale);
+bool ggml_cuda_mul_mat_fp8_shared(
+        ggml_backend_cuda_context & ctx, const ggml_tensor * src1, const ggml_cuda_fp8_matmul * mats, int count) {
+    GGML_UNUSED_VARS(ctx, src1, mats, count);
     return false;
 }
 
 #endif
+
+bool ggml_cuda_mul_mat_fp8(
+        ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst,
+        const ggml_tensor * weight_scale) {
+    const ggml_cuda_fp8_matmul mat = { src0, dst, weight_scale };
+    return ggml_cuda_mul_mat_fp8_shared(ctx, src1, &mat, 1);
+}
