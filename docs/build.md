@@ -197,9 +197,9 @@ cmake --build build --config Release
 
 To use a specific CCCL version instead of the one bundled with the installed CUDA Toolkit, add `-DGGML_CUDA_CCCL_VERSION=vMAJOR.MINOR.PATCH`. CUB DeviceTopK requires CCCL 3.4.3 or newer; older versions use the sort fallback.
 
-#### Experimental FlashInfer prefill on SM120
+#### Experimental FlashInfer prefill on SM120/SM121
 
-`GGML_CUDA_FLASHINFER=ON` enables an optional SM120 prefill adapter for FP8 E4M3 K/V, 24 query heads / 4 KV heads or 16 query heads / 2 KV heads, both with head dimension 256. It handles one stream with at least 128 queries and a validated causal mask. Decode, other masks, and other attention shapes use the existing CUDA kernels. KV scales remain in the llama graph; the adapter converts Q to unscaled E4M3 and converts the BF16 result to F32.
+`GGML_CUDA_FLASHINFER=ON` enables an optional SM120/SM121 prefill adapter for FP8 E4M3 K/V, 24 query heads / 4 KV heads or 16 query heads / 2 KV heads, both with head dimension 256. It handles one stream with at least 128 queries and a validated causal mask. Decode, other masks, and other attention shapes use the existing CUDA kernels. KV scales remain in the llama graph; the adapter converts Q to unscaled E4M3 and converts the BF16 result to F32.
 
 This requires native Linux, CUDA 13 or newer, a prebuilt FlashInfer TVM FFI kernel library, and TVM FFI headers/runtime. The llama.cpp build and inference do not invoke Python or the CuTe compiler. Build the kernel artifact separately using FlashInfer source pinned to `8ec9464ce81d81c9e3670aa09acd1a8780f83695`:
 
@@ -211,9 +211,11 @@ git -C /path/to/flashinfer checkout 8ec9464ce81d81c9e3670aa09acd1a8780f83695
     --source-dir /path/to/flashinfer --output-dir /path/to/flashinfer-kernels --kernels all
 ```
 
+Use `--gpu-arch sm_120f` for device code compatible with the SM12x family, including SM120 and SM121. Architecture-specific `sm_120a` (the default) and `sm_121a` targets are also available. Build and export natively on each machine, including host runtime libraries; an x86-64 shared library is not an ARM library. MoE still specializes the exporting GPU's SM count, including with `sm_120f`. Architecture-specific `a` artifacts are not interchangeable between SM120 and SM121. The same kernel layouts and dispatch rules apply to both; the selected small-M tactics were benchmarked on SM120 and may need separate tuning on Spark.
+
 The exporter produces `libggml_flashinfer_fp8.so` and copies its CuTe/TVM FFI runtime libraries beside it. Keep these libraries together when distributing the artifact. `--kernels attention` (the default), `gemm`, or `moe` exports individual adapters. `all` exports all three. The attention exports `ggml_flashinfer_fp8_v1` (24/4 heads) and `ggml_flashinfer_fp8_h16_kv2_v1` (16/2 heads) specialize these geometries; Q/KV lengths remain dynamic, including chunked prefill with an existing KV prefix. Libraries without the 16/2 symbol fall back to native attention for that geometry. `gemm` also exports the small-batch W4A16 kernels and the 64-row W4A4 kernel; missing small-batch exports retain native fallback.
 
-Exporting MoE also requires a visible SM120 GPU, CUDA-enabled PyTorch, and the `patch` utility. The exporter applies the supplied patches to build-directory copies of the pinned FlashInfer sources. These copies add separate up/gate operands and independent expert scales without modifying the checkout. The persistent MoE kernel specializes the GPU's SM count; export on the intended GPU. Other SM counts fall back to ggml. Inference does not require PyTorch, Python, or the FlashInfer source tree.
+Exporting MoE also requires a visible SM120/SM121 GPU, CUDA-enabled PyTorch, and the `patch` utility. The exporter applies the supplied patches to build-directory copies of the pinned FlashInfer sources. These copies add separate up/gate operands and independent expert scales without modifying the checkout. The persistent MoE kernel specializes the GPU's SM count; export on the intended GPU. Other SM counts fall back to ggml. Inference does not require PyTorch, Python, or the FlashInfer source tree.
 
 Configure llama.cpp with the artifact and a TVM FFI installation prefix containing `include/tvm/ffi`, `include/dlpack` (or `3rdparty/dlpack/include`), and `lib/libtvm_ffi.so`. For a wheel installation, this prefix is the `tvm_ffi` package directory. Use the same TVM FFI runtime version for artifact production and consumption.
 
@@ -236,7 +238,7 @@ GGML_CUDA_FLASHINFER_REPACK=1 GGML_CUDA_FLASHINFER_GEMM=1 GGML_CUDA_FLASHINFER_M
     ./build/bin/llama-bench -m /path/to/model.gguf -ngl 99 -fa 1 -ub 1024 -b 2048 -p 512,2048 -n 32
 ```
 
-- `GGML_CUDA_FLASHINFER_REPACK` stores eligible NVFP4 weights as adjacent FP4 pairs and separate 128x4 swizzled E4M3 scales. Upload reorders bytes without requantization and retains one persistent weight copy. Downloads return canonical ggml bytes. Eligibility requires contiguous leaf weights, K divisible by 64, and N divisible by 128 on SM120.
+- `GGML_CUDA_FLASHINFER_REPACK` stores eligible NVFP4 weights as adjacent FP4 pairs and separate 128x4 swizzled E4M3 scales. Upload reorders bytes without requantization and retains one persistent weight copy. Downloads return canonical ggml bytes. Eligibility requires contiguous leaf weights, K divisible by 64, and N divisible by 128 on SM120/SM121.
 - `GGML_CUDA_FLASHINFER_GEMM` selects native-layout W4A16 for 1 to 16 contiguous F32 activation rows at the benchmarked `(N,K)` shapes `(17408,5120)`, `(5120,17408)`, and `(248320,5120)`. Activations convert to BF16, while weights keep the existing packed representation. Row counts round up to 1, 2, 4, 8, or 16; padded rows are zeroed. Rows 17 to 32 use a 64-row W4A4 tile, and at least 128 rows use the existing 128-row W4A4 tile. Rows 33 to 127 retain native fallback. Gate/up shares the activation conversion or quantization and fuses independent scaling and SwiGLU. Dense matmul + scalar weight-scale fusion applies the scale during BF16-to-F32 conversion, avoiding temporary weight unpacking for the down projection. W4A4 activation quantization retains ggml's per-row scale and scale-search recipe. The pinned GEMMs use BF16 output before conversion/scaling to F32.
 - `GGML_CUDA_FLASHINFER_MOE` enables fused routed FC1, SwiGLU, FC2, and weighted reduction for 256 experts, top-8 routing, hidden size 2048, intermediate size 512, and 128 to 2048 tokens per microbatch. This targets Qwen3.6-35B-A3B-NVFP4. Router selection, normalization, and the gated shared expert remain in the llama graph. The adapter uses calibrated per-expert input scales, independent gate/up scales, BF16 boundaries, and worst-case route/task capacity.
 

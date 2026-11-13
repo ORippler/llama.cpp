@@ -41,7 +41,7 @@ bool ggml_cuda_flashinfer_mul_mat(ggml_backend_cuda_context & ctx, const ggml_te
 bool ggml_cuda_nvfp4_repack_enabled(int device) {
 #ifdef GGML_CUDA_FLASHINFER
     static const bool enabled = std::getenv("GGML_CUDA_FLASHINFER_REPACK") != nullptr;
-    return enabled && ggml_cuda_info().devices[device].cc == GGML_CUDA_CC_BLACKWELL;
+    return enabled && ggml_cuda_flashinfer_arch_supported(ggml_cuda_info().devices[device].cc);
 #else
     GGML_UNUSED(device);
     return false;

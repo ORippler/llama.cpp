@@ -93,7 +93,7 @@ struct flashinfer_stream_guard {
 
 bool ggml_cuda_flashinfer_candidate(int device, const ggml_tensor * dst) {
     static const bool disabled = std::getenv("GGML_CUDA_DISABLE_FLASHINFER") != nullptr;
-    if (disabled || ggml_cuda_info().devices[device].cc != GGML_CUDA_CC_BLACKWELL) {
+    if (disabled || !ggml_cuda_flashinfer_arch_supported(ggml_cuda_info().devices[device].cc)) {
         return false;
     }
     const ggml_tensor * q = dst->src[0];
@@ -280,7 +280,7 @@ static bool flashinfer_mul_mat(ggml_backend_cuda_context & ctx,
     static const bool enabled = std::getenv("GGML_CUDA_FLASHINFER_GEMM") != nullptr;
     const auto layout = ggml_cuda_nvfp4_get_layout(weight);
     if (!enabled || !layout.data || weight->view_src || layout.experts != 1 ||
-            ggml_cuda_info().devices[ctx.device].cc != GGML_CUDA_CC_BLACKWELL ||
+            !ggml_cuda_flashinfer_arch_supported(ggml_cuda_info().devices[ctx.device].cc) ||
             input->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
             input->ne[0] != layout.k || input->ne[1] < 1 || input->ne[2] != 1 || input->ne[3] != 1 ||
             input->nb[0] != sizeof(float) || !ggml_is_contiguous(dst) ||
@@ -384,7 +384,7 @@ static __global__ void flashinfer_moe_scales(float * output, const float * up, c
 
 bool ggml_cuda_flashinfer_moe(ggml_backend_cuda_context & ctx, const ggml_cuda_flashinfer_moe_args & args) {
     static const bool enabled = std::getenv("GGML_CUDA_FLASHINFER_MOE") != nullptr;
-    if (!enabled || ggml_cuda_info().devices[ctx.device].cc != GGML_CUDA_CC_BLACKWELL) {
+    if (!enabled || !ggml_cuda_flashinfer_arch_supported(ggml_cuda_info().devices[ctx.device].cc)) {
         return false;
     }
     const auto up = ggml_cuda_nvfp4_get_layout(args.up);

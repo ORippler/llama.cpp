@@ -2,6 +2,10 @@
 
 #include "common.cuh"
 
+static inline bool ggml_cuda_flashinfer_arch_supported(int cc) {
+    return cc == GGML_CUDA_CC_BLACKWELL || cc == GGML_CUDA_CC_DGX_SPARK;
+}
+
 static __host__ __device__ inline size_t ggml_cuda_nvfp4_scale_index(int64_t row, int64_t col, int64_t k, int64_t n) {
     GGML_UNUSED(n);
     return ((row / 128) * (k / 64) + col / 4) * 512 + (row % 32) * 16 + (row % 128 / 32) * 4 + col % 4;

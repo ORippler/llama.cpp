@@ -10,10 +10,11 @@ FLASHINFER_COMMIT = "8ec9464ce81d81c9e3670aa09acd1a8780f83695"
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Export SM120 FlashInfer prefill kernels to a TVM FFI library")
+    parser = argparse.ArgumentParser(description="Export SM120/SM121 FlashInfer kernels to a TVM FFI library")
     parser.add_argument("--source-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--cc", default="cc", help="Host linker driver")
+    parser.add_argument("--gpu-arch", choices=("sm_120a", "sm_121a", "sm_120f"), default="sm_120a")
     parser.add_argument("--kernels", choices=("attention", "gemm", "moe", "all"), default="attention")
     parser.add_argument("--max-active-clusters", type=int, default=128)
     args = parser.parse_args()
@@ -27,6 +28,7 @@ def main():
         parser.error("--max-active-clusters must be positive")
     sys.path.insert(0, str(args.source_dir.resolve()))
     os.environ.setdefault("FLASHINFER_WORKSPACE_BASE", str(args.output_dir.resolve()))
+    os.environ["CUTE_DSL_ARCH"] = args.gpu_arch
 
     import cutlass.cute as cute  # ty: ignore[unresolved-import]
 
@@ -34,15 +36,15 @@ def main():
     objects = []
     if args.kernels in ("attention", "all"):
         for q_heads, kv_heads in ((24, 4), (16, 2)):
-            objects.append(export_attention(args.output_dir, q_heads, kv_heads))
+            objects.append(export_attention(args.output_dir, q_heads, kv_heads, args.gpu_arch))
     if args.kernels in ("gemm", "all"):
         for tile_m in (128, 64):
-            objects.append(export_gemm(args.output_dir, args.max_active_clusters, tile_m))
+            objects.append(export_gemm(args.output_dir, args.max_active_clusters, tile_m, args.gpu_arch))
         for m in (1, 2, 4, 8, 16):
             for n, k, splits in ((17408, 5120, 1), (5120, 17408, 2), (248320, 5120, 1)):
-                objects.append(export_w4a16(args.output_dir, m, n, k, splits))
+                objects.append(export_w4a16(args.output_dir, m, n, k, splits, args.gpu_arch))
     if args.kernels in ("moe", "all"):
-        objects.append(export_moe(args.source_dir, args.output_dir))
+        objects.append(export_moe(args.source_dir, args.output_dir, args.gpu_arch))
 
     libraries = [Path(lib) for lib in cute.runtime.find_runtime_libraries(enable_tvm_ffi=True)]
     for library in libraries:
@@ -54,7 +56,7 @@ def main():
                     *[f"-l:{lib.name}" for lib in libraries]], check=True)
 
 
-def export_attention(output_dir, q_heads, kv_heads):
+def export_attention(output_dir, q_heads, kv_heads, gpu_arch):
     import cutlass
     import cutlass.cute as cute
     from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
@@ -79,14 +81,14 @@ def export_attention(output_dir, q_heads, kv_heads):
     o = make_fake_compact_tensor(cutlass.BFloat16, (q_len, q_heads, 256), stride_order=(2, 1, 0), assumed_align=16)
     cu = make_fake_compact_tensor(cutlass.Int32, (2,), assumed_align=4)
     compiled = cute.compile(launch, q, k, k, o, cu, cu, cutlass.Float32(1.0), cutlass.Int32(1),
-                            make_fake_stream(use_tvm_ffi_env_stream=True), options="--gpu-arch sm_120a --enable-tvm-ffi")
+                            make_fake_stream(use_tvm_ffi_env_stream=True), options=f"--gpu-arch {gpu_arch} --enable-tvm-ffi")
     symbol = "ggml_flashinfer_fp8_v1" if (q_heads, kv_heads) == (24, 4) else "ggml_flashinfer_fp8_h16_kv2_v1"
     object_path = output_dir / f"{symbol}.o"
     compiled.export_to_c(str(object_path), function_name=symbol)
     return object_path
 
 
-def export_gemm(output_dir, max_active_clusters, tile_m):
+def export_gemm(output_dir, max_active_clusters, tile_m, gpu_arch):
     import cutlass
     import cutlass.cute as cute
     from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
@@ -113,14 +115,14 @@ def export_gemm(output_dir, max_active_clusters, tile_m):
     alpha = make_fake_compact_tensor(cutlass.Float32, (1,), assumed_align=4)
     compiled = cute.compile(launch, a, b, a_sf, b_sf, output, alpha,
                             make_fake_stream(use_tvm_ffi_env_stream=True),
-                            options="--gpu-arch sm_120a --enable-tvm-ffi")
+                            options=f"--gpu-arch {gpu_arch} --enable-tvm-ffi")
     object_path = output_dir / f"ggml_flashinfer_nvfp4_{tile_m}.o"
     symbol = "ggml_flashinfer_nvfp4_gemm_v1" if tile_m == 128 else "ggml_flashinfer_nvfp4_gemm_m64_v1"
     compiled.export_to_c(str(object_path), function_name=symbol)
     return object_path
 
 
-def export_w4a16(output_dir, m, n, k, splits):
+def export_w4a16(output_dir, m, n, k, splits, gpu_arch):
     import cutlass
     import cutlass.cute as cute
     from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
@@ -152,16 +154,20 @@ def export_w4a16(output_dir, m, n, k, splits):
     alpha = make_fake_compact_tensor(cutlass.Float32, (1,), assumed_align=4)
     partial = make_fake_compact_tensor(cutlass.Float32, (cute.sym_int(),), assumed_align=16)
     compiled = cute.compile(launch, a, b, sf, output, alpha, partial,
-                            make_fake_stream(use_tvm_ffi_env_stream=True), options="--gpu-arch sm_120a --enable-tvm-ffi")
+                            make_fake_stream(use_tvm_ffi_env_stream=True), options=f"--gpu-arch {gpu_arch} --enable-tvm-ffi")
     symbol = f"ggml_flashinfer_nvfp4_w4a16_m{m}_n{n}_k{k}_s{splits}_v1"
     object_path = output_dir / f"{symbol}.o"
     compiled.export_to_c(str(object_path), function_name=symbol)
     return object_path
 
 
-def export_moe(source_dir, output_dir):
+def export_moe(source_dir, output_dir, gpu_arch):
     import importlib.util
     import torch
+
+    expected = {"sm_120a": ((12, 0),), "sm_121a": ((12, 1),), "sm_120f": ((12, 0), (12, 1))}
+    if torch.cuda.get_device_capability(0) not in expected[gpu_arch]:
+        raise ValueError("MoE export requires a GPU matching --gpu-arch")
 
     package = "flashinfer.fused_moe.cute_dsl.blackwell_sm12x"
     source_root = source_dir / "flashinfer/fused_moe/cute_dsl/blackwell_sm12x"
