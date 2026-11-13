@@ -11,11 +11,20 @@
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/function.h>
 
+static constexpr int flashinfer_w4a16_rows[] = {1, 2, 4, 8, 16};
+static constexpr struct {
+    int n;
+    int k;
+    int splits;
+} flashinfer_w4a16_shapes[] = {{17408, 5120, 1}, {5120, 17408, 2}, {248320, 5120, 1}};
+
 struct ggml_cuda_flashinfer_state {
     tvm::ffi::Optional<tvm::ffi::Module> module;
     tvm::ffi::Function run;
     tvm::ffi::Function run_16_2;
     tvm::ffi::Function gemm;
+    tvm::ffi::Function gemm_m64;
+    tvm::ffi::Function w4a16[5][3];
 
     ggml_cuda_flashinfer_state() {
         const char * path = std::getenv("GGML_CUDA_FLASHINFER_LIBRARY");
@@ -33,7 +42,24 @@ struct ggml_cuda_flashinfer_state {
             if (g.has_value()) {
                 gemm = g.value();
             }
-            GGML_LOG_INFO("ggml_cuda_flashinfer: loaded TVM FFI library (attention_24_4=%d, attention_16_2=%d, gemm=%d)\n", run.defined(), run_16_2.defined(), gemm.defined());
+            auto small = module.value()->GetFunction("ggml_flashinfer_nvfp4_gemm_m64_v1");
+            if (small.has_value()) {
+                gemm_m64 = small.value();
+            }
+            int n_w4a16 = 0;
+            for (int i = 0; i < 5; ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    const auto & shape = flashinfer_w4a16_shapes[j];
+                    const std::string name = "ggml_flashinfer_nvfp4_w4a16_m" + std::to_string(flashinfer_w4a16_rows[i]) +
+                        "_n" + std::to_string(shape.n) + "_k" + std::to_string(shape.k) + "_s" + std::to_string(shape.splits) + "_v1";
+                    auto f = module.value()->GetFunction(name);
+                    if (f.has_value()) {
+                        w4a16[i][j] = f.value();
+                        ++n_w4a16;
+                    }
+                }
+            }
+            GGML_LOG_INFO("ggml_cuda_flashinfer: loaded TVM FFI library (attention_24_4=%d, attention_16_2=%d, gemm=%d, gemm_m64=%d, w4a16=%d)\n", run.defined(), run_16_2.defined(), gemm.defined(), gemm_m64.defined(), n_w4a16);
         } catch (const std::exception & e) {
             GGML_LOG_WARN("ggml_cuda_flashinfer: TVM FFI unavailable: %s\n", e.what());
         }
@@ -174,9 +200,9 @@ static __global__ void flashinfer_row_scale(float * output, const nv_bfloat16 * 
         const nv_bfloat16 * gate, const float * up_scale, const float * gate_scale, int64_t n, int64_t count) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i < count) {
-        float value = __bfloat162float(source[i]) * scales[i / n] * (up_scale ? *up_scale : 1.0f);
+        float value = __bfloat162float(source[i]) * (scales ? scales[i / n] : 1.0f) * (up_scale ? *up_scale : 1.0f);
         if (gate) {
-            const float g = __bfloat162float(gate[i]) * scales[i / n] * (gate_scale ? *gate_scale : 1.0f);
+            const float g = __bfloat162float(gate[i]) * (scales ? scales[i / n] : 1.0f) * (gate_scale ? *gate_scale : 1.0f);
             value *= g / (1.0f + expf(-g));
         }
         output[i] = value;
@@ -187,6 +213,67 @@ static __global__ void flashinfer_set_one(float * value) {
     *value = 1.0f;
 }
 
+static bool flashinfer_mul_mat_w4a16(ggml_backend_cuda_context & ctx,
+        const ggml_tensor * weight, const ggml_tensor * input, ggml_tensor * dst,
+        const ggml_tensor * gate_weight, const ggml_tensor * up_scale, const ggml_tensor * gate_scale) {
+    const auto layout = ggml_cuda_nvfp4_get_layout(weight);
+    const int64_t m = input->ne[1], n = layout.n, k = layout.k;
+    if (m < 1 || m > 16 || !ggml_is_contiguous(input)) {
+        return false;
+    }
+    int mi = 0;
+    while (flashinfer_w4a16_rows[mi] < m) {
+        ++mi;
+    }
+    int wi = 0;
+    while (wi < 3 && (flashinfer_w4a16_shapes[wi].n != n || flashinfer_w4a16_shapes[wi].k != k)) {
+        ++wi;
+    }
+    if (wi == 3 || !ctx.flashinfer->w4a16[mi][wi].defined()) {
+        return false;
+    }
+    const auto & run = ctx.flashinfer->w4a16[mi][wi];
+    const int64_t rows = flashinfer_w4a16_rows[mi];
+    const int splits = flashinfer_w4a16_shapes[wi].splits;
+    const int64_t partial_count = splits > 1 ? splits * rows * n : 1;
+    ggml_cuda_pool_alloc<nv_bfloat16> a(ctx.pool(), rows * k);
+    ggml_cuda_pool_alloc<nv_bfloat16> output(ctx.pool(), rows * n);
+    ggml_cuda_pool_alloc<nv_bfloat16> gate_output(ctx.pool());
+    if (gate_weight) {
+        gate_output.alloc(rows * n);
+    }
+    ggml_cuda_pool_alloc<float> partial(ctx.pool(), partial_count);
+    ggml_cuda_pool_alloc<float> alpha(ctx.pool(), 1);
+    if (m != rows) {
+        CUDA_CHECK(cudaMemsetAsync(a.ptr + m * k, 0, (rows - m) * k * sizeof(nv_bfloat16), ctx.stream()));
+    }
+    ggml_get_to_bf16_cuda(GGML_TYPE_F32)(input->data, a.ptr, m * k, ctx.stream());
+    flashinfer_set_one<<<1, 1, 0, ctx.stream()>>>(alpha.ptr);
+
+    int64_t a_shape[] = {rows, k}, a_strides[] = {k, 1}, b_shape[] = {n, k / 2}, b_strides[] = {k / 2, 1};
+    int64_t sf_shape[] = {n * k / 16}, one[] = {1}, out_shape[] = {rows, n}, out_strides[] = {n, 1}, partial_shape[] = {partial_count};
+    const DLDevice device = {kDLCUDA, ctx.device};
+    DLTensor a_arg = {a.ptr, device, 2, {kDLBfloat, 16, 1}, a_shape, a_strides, 0};
+    DLTensor b_arg = {layout.data, device, 2, {kDLUInt, 8, 1}, b_shape, b_strides, 0};
+    DLTensor sf_arg = {layout.scales, device, 1, {kDLUInt, 8, 1}, sf_shape, one, 0};
+    DLTensor out_arg = {output.ptr, device, 2, {kDLBfloat, 16, 1}, out_shape, out_strides, 0};
+    DLTensor alpha_arg = {alpha.ptr, device, 1, {kDLFloat, 32, 1}, one, one, 0};
+    DLTensor partial_arg = {partial.ptr, device, 1, {kDLFloat, 32, 1}, partial_shape, one, 0};
+    flashinfer_stream_guard stream_guard(ctx.device, ctx.stream());
+    run(&a_arg, &b_arg, &sf_arg, &out_arg, &alpha_arg, &partial_arg);
+    if (gate_weight) {
+        const auto gate = ggml_cuda_nvfp4_get_layout(gate_weight);
+        b_arg.data = gate.data;
+        sf_arg.data = gate.scales;
+        out_arg.data = gate_output.ptr;
+        run(&a_arg, &b_arg, &sf_arg, &out_arg, &alpha_arg, &partial_arg);
+    }
+    flashinfer_row_scale<<<(m * n + 255) / 256, 256, 0, ctx.stream()>>>((float *) dst->data, output.ptr, nullptr,
+        gate_output.ptr, up_scale ? (const float *) up_scale->data : nullptr, gate_scale ? (const float *) gate_scale->data : nullptr, n, m * n);
+    CUDA_CHECK(cudaGetLastError());
+    return true;
+}
+
 static bool flashinfer_mul_mat(ggml_backend_cuda_context & ctx,
         const ggml_tensor * weight, const ggml_tensor * input, ggml_tensor * dst, const ggml_tensor * precision_node,
         const ggml_tensor * gate_weight = nullptr, const ggml_tensor * up_scale = nullptr, const ggml_tensor * gate_scale = nullptr) {
@@ -195,7 +282,7 @@ static bool flashinfer_mul_mat(ggml_backend_cuda_context & ctx,
     if (!enabled || !layout.data || weight->view_src || layout.experts != 1 ||
             ggml_cuda_info().devices[ctx.device].cc != GGML_CUDA_CC_BLACKWELL ||
             input->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
-            input->ne[0] != layout.k || input->ne[1] < 128 || input->ne[2] != 1 || input->ne[3] != 1 ||
+            input->ne[0] != layout.k || input->ne[1] < 1 || input->ne[2] != 1 || input->ne[3] != 1 ||
             input->nb[0] != sizeof(float) || !ggml_is_contiguous(dst) ||
             dst->ne[0] != layout.n || dst->ne[1] != input->ne[1] || dst->ne[2] != 1 || dst->ne[3] != 1 ||
             !ggml_cuda_nvfp4_q4_allowed(precision_node)) {
@@ -208,11 +295,15 @@ static bool flashinfer_mul_mat(ggml_backend_cuda_context & ctx,
     if (!ctx.flashinfer) {
         ctx.flashinfer = flashinfer_state();
     }
-    if (!ctx.flashinfer->gemm.defined()) {
+    const int64_t m = input->ne[1], n = layout.n, k = layout.k;
+    if (m <= 16) {
+        return flashinfer_mul_mat_w4a16(ctx, weight, input, dst, gate_weight, up_scale, gate_scale);
+    }
+    const auto & gemm = m <= 32 ? ctx.flashinfer->gemm_m64 : ctx.flashinfer->gemm;
+    if ((m > 32 && m < 128) || !gemm.defined()) {
         return false;
     }
-    const int64_t m = input->ne[1], n = layout.n, k = layout.k;
-    const int64_t m_padded = GGML_PAD(m, 128);
+    const int64_t m_padded = GGML_PAD(m, m <= 32 ? 64 : 128);
     ggml_cuda_pool_alloc<uint8_t> a(ctx.pool(), m_padded * k / 2);
     ggml_cuda_pool_alloc<uint8_t> a_sf(ctx.pool(), GGML_PAD(m, 128) * k / 16);
     ggml_cuda_pool_alloc<float> row_scales(ctx.pool(), m + 1);
@@ -241,12 +332,12 @@ static bool flashinfer_mul_mat(ggml_backend_cuda_context & ctx,
     DLTensor out_arg = {output, device, 2, {kDLBfloat, 16, 1}, out_shape, out_strides, 0};
     DLTensor alpha_arg = {row_scales.ptr + m, device, 1, f32, alpha_shape, stride_one, 0};
     flashinfer_stream_guard guard(ctx.device, ctx.stream());
-    ctx.flashinfer->gemm(&a_arg, &b_arg, &asf_arg, &bsf_arg, &out_arg, &alpha_arg);
+    gemm(&a_arg, &b_arg, &asf_arg, &bsf_arg, &out_arg, &alpha_arg);
     if (gate_weight) {
         b_arg.data = gate.data;
         bsf_arg.data = gate.scales;
         out_arg.data = gate_output.ptr;
-        ctx.flashinfer->gemm(&a_arg, &b_arg, &asf_arg, &bsf_arg, &out_arg, &alpha_arg);
+        gemm(&a_arg, &b_arg, &asf_arg, &bsf_arg, &out_arg, &alpha_arg);
     }
     flashinfer_row_scale<<<(m * n + 255) / 256, 256, 0, ctx.stream()>>>((float *) dst->data, output, row_scales.ptr,
         gate_output.ptr, up_scale ? (const float *) up_scale->data : nullptr, gate_scale ? (const float *) gate_scale->data : nullptr, n, m * n);

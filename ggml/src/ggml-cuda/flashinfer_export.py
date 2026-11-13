@@ -36,7 +36,11 @@ def main():
         for q_heads, kv_heads in ((24, 4), (16, 2)):
             objects.append(export_attention(args.output_dir, q_heads, kv_heads))
     if args.kernels in ("gemm", "all"):
-        objects.append(export_gemm(args.output_dir, args.max_active_clusters))
+        for tile_m in (128, 64):
+            objects.append(export_gemm(args.output_dir, args.max_active_clusters, tile_m))
+        for m in (1, 2, 4, 8, 16):
+            for n, k, splits in ((17408, 5120, 1), (5120, 17408, 2), (248320, 5120, 1)):
+                objects.append(export_w4a16(args.output_dir, m, n, k, splits))
     if args.kernels in ("moe", "all"):
         objects.append(export_moe(args.source_dir, args.output_dir))
 
@@ -82,14 +86,14 @@ def export_attention(output_dir, q_heads, kv_heads):
     return object_path
 
 
-def export_gemm(output_dir, max_active_clusters):
+def export_gemm(output_dir, max_active_clusters, tile_m):
     import cutlass
     import cutlass.cute as cute
     from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
     from cuda.bindings import driver as cuda
     from flashinfer.gemm.kernels.dense_blockscaled_gemm_sm120_b12x import DenseGemmKernel
 
-    gemm = DenseGemmKernel(16, (128, 128), (1, 1), enable_pdl=False)
+    gemm = DenseGemmKernel(16, (tile_m, 128), (1, 1), enable_pdl=False)
 
     @cute.jit
     def launch(a: cute.Tensor, b: cute.Tensor, a_sf: cute.Tensor, b_sf: cute.Tensor,
@@ -110,8 +114,48 @@ def export_gemm(output_dir, max_active_clusters):
     compiled = cute.compile(launch, a, b, a_sf, b_sf, output, alpha,
                             make_fake_stream(use_tvm_ffi_env_stream=True),
                             options="--gpu-arch sm_120a --enable-tvm-ffi")
-    object_path = output_dir / "ggml_flashinfer_nvfp4_128.o"
-    compiled.export_to_c(str(object_path), function_name="ggml_flashinfer_nvfp4_gemm_v1")
+    object_path = output_dir / f"ggml_flashinfer_nvfp4_{tile_m}.o"
+    symbol = "ggml_flashinfer_nvfp4_gemm_v1" if tile_m == 128 else "ggml_flashinfer_nvfp4_gemm_m64_v1"
+    compiled.export_to_c(str(object_path), function_name=symbol)
+    return object_path
+
+
+def export_w4a16(output_dir, m, n, k, splits):
+    import cutlass
+    import cutlass.cute as cute
+    from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
+    from cuda.bindings import driver as cuda
+    from flashinfer.gemm.kernels.native_bf16_fp4.staged_kernel import NativeBf16Fp4StagedKernel
+
+    warps = 8 if n == 248320 and m == 1 else 4
+    stages = 2 if n == 17408 or (n == 248320 and m == 4) else 3
+    gemm = NativeBf16Fp4StagedKernel(splits, warps, False, 128, stages)
+
+    @cute.jit
+    def launch(a: cute.Tensor, b: cute.Tensor, sf: cute.Tensor, output: cute.Tensor,
+               alpha: cute.Tensor, partial: cute.Tensor, stream: cuda.CUstream):
+        a_view = cute.make_tensor(cute.recast_ptr(a.iterator, dtype=cutlass.Int32),
+                                  cute.make_layout((m, k // 2), stride=(k // 2, 1)))
+        b_view = cute.make_tensor(cute.recast_ptr(b.iterator, dtype=cutlass.Int32),
+                                  cute.make_layout((n, k // 8), stride=(k // 8, 1)))
+        sf_view = cute.make_tensor(cute.recast_ptr(sf.iterator, dtype=cutlass.Float8E4M3FN), sf.layout)
+        partial_view = None
+        if cutlass.const_expr(splits > 1):
+            partial_view = cute.make_tensor(partial.iterator,
+                                            cute.make_layout((splits, m, n), stride=(m * n, n, 1)))
+        gemm(a_view, b_view, sf_view, alpha, output, partial_view, stream)
+
+    a = make_fake_compact_tensor(cutlass.BFloat16, (m, k), stride_order=(1, 0), assumed_align=16)
+    b = make_fake_compact_tensor(cutlass.Uint8, (n, k // 2), stride_order=(1, 0), assumed_align=16)
+    sf = make_fake_compact_tensor(cutlass.Uint8, (n * k // 16,), assumed_align=16)
+    output = make_fake_compact_tensor(cutlass.BFloat16, (m, n), stride_order=(1, 0), assumed_align=16)
+    alpha = make_fake_compact_tensor(cutlass.Float32, (1,), assumed_align=4)
+    partial = make_fake_compact_tensor(cutlass.Float32, (cute.sym_int(),), assumed_align=16)
+    compiled = cute.compile(launch, a, b, sf, output, alpha, partial,
+                            make_fake_stream(use_tvm_ffi_env_stream=True), options="--gpu-arch sm_120a --enable-tvm-ffi")
+    symbol = f"ggml_flashinfer_nvfp4_w4a16_m{m}_n{n}_k{k}_s{splits}_v1"
+    object_path = output_dir / f"{symbol}.o"
+    compiled.export_to_c(str(object_path), function_name=symbol)
     return object_path
 
 

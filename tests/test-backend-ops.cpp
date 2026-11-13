@@ -13688,6 +13688,18 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     for (int64_t m : {128, 512}) {
         test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_NVFP4, GGML_GLU_OP_SWIGLU, m, 256, 2048, false, 1, 1, false, false, false, true, {1, 1}));
     }
+    // Small dense NVFP4 routes and padded row buckets.
+    for (int64_t m : {1, 3, 16}) {
+        test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_NVFP4, GGML_GLU_OP_SWIGLU, m, 17408, 5120, false, 1, 1, false, false, true, true, {1, 1}));
+    }
+    for (int64_t m : {5, 15}) {
+        test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_NVFP4, GGML_GLU_OP_SWIGLU, m, 5120, 17408, false, 1, 1, false, false, false, true, {1, 1}));
+    }
+    for (int64_t m : {17, 31}) {
+        test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_NVFP4, GGML_GLU_OP_SWIGLU, m, 256, 2048, false, 1, 1, false, false, true, true, {1, 1}));
+    }
+    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_NVFP4, GGML_TYPE_F32, 5120, 7, 17408, {1, 1}, {1, 1}));
+    test_cases.emplace_back(new test_mul_mat_fusion_w4a8(GGML_TYPE_NVFP4, GGML_GLU_OP_SWIGLU, 3, 17408, 5120, false, 1, 1, false, false, true, true, {1, 1}));
     test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_NVFP4,  GGML_GLU_OP_SWIGLU,       150,  2560, 256, true, 16, 8, false, false, false, true));
     // Same pattern with broadcast input, 4 of 16 experts used, 8-bit activations (W4A8), and Q4_K, which keeps the scale as a separate node
     test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_NVFP4,  GGML_GLU_OP_SWIGLU,       150,  2560, 256, true, 16, 8, true,  false, false, true));
