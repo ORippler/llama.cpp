@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 
-FLASHINFER_COMMIT = "8ec9464ce81d81c9e3670aa09acd1a8780f83695"
+FLASHINFER_COMMIT = "77039051b0be921788dc2784ec41423b558878ec"
 
 
 def main():
@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--gpu-arch", choices=("sm_120a", "sm_121a", "sm_120f"), default="sm_120a")
     parser.add_argument("--kernels", choices=("attention", "gemm", "moe", "all"), default="attention")
     parser.add_argument("--max-active-clusters", type=int, default=128)
+    parser.add_argument("--moe-sm-counts", type=int, nargs="+", help="MoE worker-grid variants, e.g. 48 82; default: visible GPU")
     args = parser.parse_args()
     revision = subprocess.check_output(
         ["git", "-C", str(args.source_dir), "rev-parse", "HEAD"], text=True).strip()
@@ -26,6 +27,8 @@ def main():
         parser.error("FlashInfer sources must match the pinned checkout")
     if args.max_active_clusters <= 0:
         parser.error("--max-active-clusters must be positive")
+    if args.moe_sm_counts and any(count <= 0 for count in args.moe_sm_counts):
+        parser.error("--moe-sm-counts must be positive")
     sys.path.insert(0, str(args.source_dir.resolve()))
     os.environ.setdefault("FLASHINFER_WORKSPACE_BASE", str(args.output_dir.resolve()))
     os.environ["CUTE_DSL_ARCH"] = args.gpu_arch
@@ -44,7 +47,7 @@ def main():
             for n, k, splits in ((17408, 5120, 1), (5120, 17408, 2), (248320, 5120, 1)):
                 objects.append(export_w4a16(args.output_dir, m, n, k, splits, args.gpu_arch))
     if args.kernels in ("moe", "all"):
-        objects.append(export_moe(args.source_dir, args.output_dir, args.gpu_arch))
+        objects.extend(export_moe(args.source_dir, args.output_dir, args.gpu_arch, args.moe_sm_counts))
 
     libraries = [Path(lib) for lib in cute.runtime.find_runtime_libraries(enable_tvm_ffi=True)]
     for library in libraries:
@@ -161,13 +164,15 @@ def export_w4a16(output_dir, m, n, k, splits, gpu_arch):
     return object_path
 
 
-def export_moe(source_dir, output_dir, gpu_arch):
+def export_moe(source_dir, output_dir, gpu_arch, sm_counts):
     import importlib.util
     import torch
 
-    expected = {"sm_120a": ((12, 0),), "sm_121a": ((12, 1),), "sm_120f": ((12, 0), (12, 1))}
-    if torch.cuda.get_device_capability(0) not in expected[gpu_arch]:
-        raise ValueError("MoE export requires a GPU matching --gpu-arch")
+    if sm_counts is None:
+        expected = {"sm_120a": ((12, 0),), "sm_121a": ((12, 1),), "sm_120f": ((12, 0), (12, 1))}
+        if torch.cuda.get_device_capability(0) not in expected[gpu_arch]:
+            raise ValueError("Automatic MoE export requires a GPU matching --gpu-arch")
+        sm_counts = [torch.cuda.get_device_properties(0).multi_processor_count]
 
     package = "flashinfer.fused_moe.cute_dsl.blackwell_sm12x"
     source_root = source_dir / "flashinfer/fused_moe/cute_dsl/blackwell_sm12x"
@@ -175,7 +180,7 @@ def export_moe(source_dir, output_dir, gpu_arch):
     def load_overlay(name, source, patch_name):
         target = output_dir / f"{source.stem}_ggml.py"
         patch = Path(__file__).with_name(patch_name)
-        subprocess.run(["patch", "--batch", "--silent", "--output", str(target), str(source), str(patch)], check=True)
+        subprocess.run(["patch", "--batch", "--silent", "--fuzz=0", "--output", str(target), str(source), str(patch)], check=True)
         spec = importlib.util.spec_from_file_location(name, target)
         module = importlib.util.module_from_spec(spec)
         sys.modules[name] = module
@@ -193,13 +198,17 @@ def export_moe(source_dir, output_dir, gpu_arch):
 
     dispatch.MoEDynamicKernel = make_kernel
     dispatch.build_and_load_cute_dsl_kernel = lambda _module, _name, compile_kernel, **kwargs: compile_kernel()
-    torch.cuda.synchronize()
-    compiled, _ = dispatch._get_dynamic_kernel(256, 2048, 2048, 512, 8, 49152,
-        fast_math=False, input_scales_are_reciprocal=False, intermediate_size=512)
-    sm_count = torch.cuda.get_device_properties(0).multi_processor_count
-    object_path = output_dir / "ggml_flashinfer_nvfp4_moe.o"
-    compiled.export_to_c(str(object_path), function_name=f"ggml_flashinfer_nvfp4_moe_sm{sm_count}_v2")
-    return object_path
+    objects = []
+    for sm_count in dict.fromkeys(sm_counts):
+        # The selected kernel uses one resident CTA per SM and no multi-CTA clusters.
+        dispatch.get_num_sm = lambda _device, count=sm_count: count
+        dispatch.get_max_active_clusters = lambda _cluster_size, count=sm_count: count
+        compiled, _ = dispatch._get_dynamic_kernel(256, 2048, 2048, 512, 8, 49152,
+            fast_math=False, input_scales_are_reciprocal=False, intermediate_size=512)
+        object_path = output_dir / f"ggml_flashinfer_nvfp4_moe_sm{sm_count}.o"
+        compiled.export_to_c(str(object_path), function_name=f"ggml_flashinfer_nvfp4_moe_sm{sm_count}_v2")
+        objects.append(object_path)
+    return objects
 
 
 if __name__ == "__main__":

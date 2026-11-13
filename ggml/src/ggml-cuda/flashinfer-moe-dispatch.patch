@@ -1,19 +1,49 @@
 --- moe_dispatch.py
 +++ moe_dispatch_ggml.py
-@@ -2850,0 +2851,2 @@
+@@ -2873,6 +2873,8 @@
+         task_valid_rows_ptr: cute.Pointer,
+         b_w13: cute.Tensor,
+         sfb_w13_ptr: cute.Pointer,
 +        b_gate: cute.Tensor,
 +        sfb_gate_ptr: cute.Pointer,
-@@ -2932,0 +2935,2 @@
+         b_down: cute.Tensor,
+         sfb_down_ptr: cute.Pointer,
+         row_counts: cute.Tensor,
+@@ -2955,6 +2957,8 @@
+             task_valid_rows,
+             b_w13,
+             sfb_w13_ptr,
 +            b_gate,
 +            sfb_gate_ptr,
-@@ -3170,2 +3174,2 @@
+             b_down,
+             sfb_down_ptr,
+             row_counts,
+@@ -3192,8 +3196,8 @@
+
+     if branch_major_extent is not None:
+         # Branch-paired gated kernel: branch-major views at the true extent
 -        # (up at batch 2e, gate at 2e+1; FC2 reduces over I_true).
 -        w13_fake_shape = (branch_major_extent, k, 2 * E)
 +        # (separate up and gate tensors; FC2 reduces over I_true).
 +        w13_fake_shape = (branch_major_extent, k, E)
-@@ -3204 +3208 @@
+         down_fake_shape = (k, branch_major_extent, E)
+     else:
+         # Generic kernel: concatenated views with independently bounded branches.
+@@ -3226,7 +3230,7 @@
+         alpha_dtype, (E,), assumed_align=16
+     )
+     alpha_fake = cute.runtime.make_fake_compact_tensor(
 -        alpha_dtype, (E,), assumed_align=16
 +        alpha_dtype, (2 * E,), assumed_align=16
-@@ -3241,0 +3246,2 @@
+     )
+     down_alpha_fake = cute.runtime.make_fake_compact_tensor(
+         alpha_dtype, (E,), assumed_align=16
+@@ -3264,6 +3268,8 @@
+             task_tail_fake,
+             task_expert_fake,
+             task_valid_rows_fake,
 +            b_w13_fake,
 +            sfb_w13_fake,
+             b_w13_fake,
+             sfb_w13_fake,
+             b_down_fake,

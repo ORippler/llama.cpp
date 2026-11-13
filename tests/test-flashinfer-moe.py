@@ -1,4 +1,4 @@
-"""Check the exported SM120 MoE kernel against sparse, independently scaled experts.
+"""Check the exported SM120/SM121 MoE kernel against sparse, independently scaled experts.
 
 Run with the export environment: python tests/test-flashinfer-moe.py --library LIBRARY
 """
@@ -11,7 +11,12 @@ import tvm_ffi
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--library", required=True)
 parser.add_argument("--tokens", type=int, choices=(128, 129, 512, 2048), default=128)
+parser.add_argument("--sm-count", type=int, help="test an explicit worker-grid variant on a GPU with at least this many SMs")
 args = parser.parse_args()
+device_sm_count = torch.cuda.get_device_properties(0).multi_processor_count
+sm_count = device_sm_count if args.sm_count is None else args.sm_count
+if sm_count <= 0 or sm_count > device_sm_count:
+    parser.error("--sm-count must be positive and must not exceed the visible GPU's SM count")
 
 E, H, I, T = 256, 2048, 512, args.tokens
 D = "cuda"
@@ -35,7 +40,7 @@ ds = torch.ones(E, device=D) * 0.001
 alpha = torch.stack((torch.linspace(0.5, 1, E, device=D), torch.linspace(0.75, 1.25, E, device=D)), 1) * is_[:, None]
 da = ds.clone()
 mod = tvm_ffi.load_module(args.library)
-f = mod[f"ggml_flashinfer_nvfp4_moe_sm{torch.cuda.get_device_properties(0).multi_processor_count}_v2"]
+f = mod[f"ggml_flashinfer_nvfp4_moe_sm{sm_count}_v2"]
 vals = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], device=D)
 
 

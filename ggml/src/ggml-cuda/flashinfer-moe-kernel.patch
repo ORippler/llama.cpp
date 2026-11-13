@@ -1,73 +1,174 @@
 --- gated.py
 +++ gated_ggml.py
-@@ -1693,2 +1693,2 @@
+@@ -1690,8 +1690,8 @@
+                     gate_slice = fc1_tRS_rGate[(None, mma_m, mma_n)]
+                     up_slice = fc1_tRS_rUp[(None, mma_m, mma_n)]
+                     for elem_idx in cutlass.range_constexpr(cute.size(fc1_tRS_rAct)):
 -                        g = alpha_value * gate_slice[elem_idx]
 -                        u = alpha_value * up_slice[elem_idx]
 +                        g = alpha_value[1] * gate_slice[elem_idx]
 +                        u = alpha_value[0] * up_slice[elem_idx]
-@@ -2163,2 +2163,2 @@
+                         fc1_tRS_rAct[elem_idx] = _dynamic_gated_activation_f32(
+                             g,
+                             u,
+@@ -2160,8 +2160,8 @@
+                         for elem_idx in cutlass.range_constexpr(
+                             cute.size(fc1_tRS_rAct)
+                         ):
 -                            g = alpha_value * gate_slice[elem_idx]
 -                            u = alpha_value * up_slice[elem_idx]
 +                            g = alpha_value[1] * gate_slice[elem_idx]
 +                            u = alpha_value[0] * up_slice[elem_idx]
-@@ -2866,2 +2866,2 @@
+                             fc1_tRS_rAct[elem_idx] = _dynamic_gated_activation_f32(
+                                 g,
+                                 u,
+@@ -2863,8 +2863,8 @@
+         )
+         prod_state.reset_count()
+         gate_wait_pending = wait_for_prior_slice
 -        up_batch_idx = task_expert_idx * Int32(2)
 -        gate_batch_idx = up_batch_idx + Int32(1)
 +        up_batch_idx = task_expert_idx
 +        gate_batch_idx = task_expert_idx
-@@ -2881 +2881 @@
+         # Prefer retaining reused activations over streamed FP4 weights in L2.
+         weight_cache_policy = Int64(create_l2_evict_first_policy())
+         for fc1_half in cutlass.range_constexpr(2):
+@@ -2878,7 +2878,7 @@
+             ):
+                 load_half = intermediate_slice < Int32(self._intermediate_size // 128)
+             native_slice_idx = intermediate_slice * Int32(2) + Int32(fc1_half)
 -            tBgB_w13_gate_nk = tBgB_w13[
 +            tBgB_w13_gate_nk = tBgB_w13[1][
-@@ -2889 +2889 @@
+                 (
+                     None,
+                     native_slice_idx,
+@@ -2886,7 +2886,7 @@
+                     gate_batch_idx,
+                 )
+             ]
 -            tBgB_w13_up_nk = tBgB_w13[
 +            tBgB_w13_up_nk = tBgB_w13[0][
-@@ -2897 +2897 @@
+                 (
+                     None,
+                     native_slice_idx,
+@@ -2894,7 +2894,7 @@
+                     up_batch_idx,
+                 )
+             ]
 -            tBgSFB_w13_gate_nk = tBgSFB_w13[
 +            tBgSFB_w13_gate_nk = tBgSFB_w13[1][
-@@ -2905 +2905 @@
+                 (
+                     None,
+                     intermediate_slice,
+@@ -2902,7 +2902,7 @@
+                     gate_batch_idx,
+                 )
+             ]
 -            tBgSFB_w13_up_nk = tBgSFB_w13[
 +            tBgSFB_w13_up_nk = tBgSFB_w13[0][
-@@ -2970 +2970 @@
+                 (
+                     None,
+                     intermediate_slice,
+@@ -2967,14 +2967,14 @@
+                             tma_bar_ptr=ml_pipeline.producer_get_barrier(prod_state),
+                         )
+                     cute.copy(
 -                        tma_b_w13,
 +                        tma_b_w13[1],
-@@ -2977 +2977 @@
+                         tBgB_w13_gate_nk[(None, k_tile)],
+                         tBsB_w13[(None, prod_state.index)],
+                         tma_bar_ptr=ml_pipeline.producer_get_barrier(prod_state),
+                         cache_policy=weight_cache_policy,
+                     )
+                     cute.copy(
 -                        tma_b_w13,
 +                        tma_b_w13[0],
-@@ -2990 +2990 @@
+                         tBgB_w13_up_nk[(None, k_tile)],
+                         tBsB_w13_up[(None, prod_state.index)],
+                         tma_bar_ptr=ml_pipeline.producer_get_barrier(prod_state),
+@@ -2987,21 +2987,21 @@
+                         tma_bar_ptr=ml_pipeline.producer_get_barrier(prod_state),
+                     )
+                     cute.copy(
 -                        tma_sfb_w13,
 +                        tma_sfb_w13[1],
-@@ -2997 +2997 @@
+                         tBgSFB_w13_gate_nk[(None, k_tile)],
+                         tBsSFB_w13[(None, prod_state.index)],
+                         tma_bar_ptr=ml_pipeline.producer_get_barrier(prod_state),
+                     )
+                     if prod_state.index < Int32(self.ab_storage_stage):
+                         cute.copy(
 -                            tma_sfb_w13,
 +                            tma_sfb_w13[0],
-@@ -3004 +3004 @@
+                             tBgSFB_w13_up_nk[(None, k_tile)],
+                             tBsSFB_w13_up[(None, prod_state.index)],
+                             tma_bar_ptr=ml_pipeline.producer_get_barrier(prod_state),
+                         )
+                     else:
+                         cute.copy(
 -                            tma_sfb_w13,
 +                            tma_sfb_w13[0],
-@@ -3990,2 +3990,4 @@
+                             tBgSFB_w13_up_nk[(None, k_tile)],
+                             tBsSFB_w13_up_extra,
+                             tma_bar_ptr=ml_pipeline.producer_get_barrier(prod_state),
+@@ -3987,8 +3987,10 @@
+         task_tail: cute.Tensor,  # [1] int32
+         task_expert: cute.Tensor,  # [max_tasks] int32
+         task_valid_rows: cute.Tensor,  # [max_tasks] int32
 -        b_w13: cute.Tensor,  # [2*I_tp, K, E] (gated) or [I_tp, K, E] (relu2)
 -        sfb_w13_ptr: cute.Pointer,  # scale factors for w13
 +        b_w13: cute.Tensor,  # [I_tp, K, E] up weights
 +        sfb_w13_ptr: cute.Pointer,  # scale factors for up
 +        b_gate: cute.Tensor,
 +        sfb_gate_ptr: cute.Pointer,
-@@ -4032 +4034 @@
+         b_down: cute.Tensor,  # [K, I_tp, E]
+         sfb_down_ptr: cute.Pointer,
+         row_counts: cute.Tensor,  # expert row histogram [E]
+@@ -4029,7 +4031,7 @@
+         )
+         sfa_tensor = cute.make_tensor(sfa_ptr, sfa_layout)
+
 -        # w13 is branch-major [I_true, K, 2E] (up at batch 2e, gate at 2e+1).
 +        # Up and gate use separate [I_true, K, E] tensors.
-@@ -4044,0 +4047 @@
+         # The block scales stay on the 128-row SF atom grid (the dispatch pads
+         # each branch to 128 rows), so the SF layout spans the aligned extent
+         # while the FP4 operand keeps its true extent (see the static kernel).
+@@ -4042,6 +4044,7 @@
+             self.sf_vec_size,
+         )
+         sfb_w13_tensor = cute.make_tensor(sfb_w13_ptr, sfb_w13_layout)
 +        sfb_gate_tensor = cute.make_tensor(sfb_gate_ptr, sfb_w13_layout)
-@@ -4131 +4134 @@
+
+         # TMA descriptors
+         tma_a, gA = self._dense_cls._make_tma_atoms_and_tensors(
+@@ -4128,22 +4131,37 @@
+         # last tiles run past the N extent and TMA zero-fills them without a
+         # global read; the other branch is a batch coordinate, so nothing
+         # aliases.
 -        tma_b_w13, gB_w13 = self._dense_cls._make_tma_atoms_and_tensors(
 +        tma_b_up, gB_up = self._dense_cls._make_tma_atoms_and_tensors(
-@@ -4136,0 +4140,6 @@
+             b_w13,
+             self.fc1_b_smem_layout_staged,
+             (self.fc1_tile_shape_mnk[1], self.fc1_tile_shape_mnk[2]),
+             1,
+         )
 +        tma_b_gate, gB_gate = self._dense_cls._make_tma_atoms_and_tensors(
 +            b_gate,
 +            self.fc1_b_smem_layout_staged,
 +            (self.fc1_tile_shape_mnk[1], self.fc1_tile_shape_mnk[2]),
 +            1,
 +        )
-@@ -4140 +4149 @@
+         # SFB is different from B: the SM120 helper physically packs scale
+         # factors in N128 blocks.  Both N64 halves replay the same physical
+         # block and select half 0/1 from its shared-memory view.
 -        tma_sfb_w13, gSFB_w13 = self._dense_cls._make_tma_atoms_and_tensors(
 +        tma_sfb_up, gSFB_up = self._dense_cls._make_tma_atoms_and_tensors(
-@@ -4146,0 +4156,9 @@
+             sfb_w13_tensor,
+             self.fc1_sfb_smem_layout_staged,
+             self.fc1_sfb_tile_shape_nk,
+             1,
+             internal_type=cutlass.Int16,
+         )
 +        tma_sfb_gate, gSFB_gate = self._dense_cls._make_tma_atoms_and_tensors(
 +            sfb_gate_tensor,
 +            self.fc1_sfb_smem_layout_staged,
@@ -77,7 +178,13 @@
 +        )
 +        tma_b_w13, gB_w13 = (tma_b_up, tma_b_gate), (gB_up, gB_gate)
 +        tma_sfb_w13, gSFB_w13 = (tma_sfb_up, tma_sfb_gate), (gSFB_up, gSFB_gate)
-@@ -4287,4 +4305,4 @@
+         # B_down TMA
+         sfb_down_layout = blockscaled_utils.tile_atom_to_shape_SF(
+             (
+@@ -4284,10 +4302,10 @@
+         mA16: cute.Tensor,
+         tma_sfa: cute.CopyAtom,
+         mSFA: cute.Tensor,
 -        tma_b_w13: cute.CopyAtom,
 -        mB_w13: cute.Tensor,
 -        tma_sfb_w13: cute.CopyAtom,
@@ -86,23 +193,40 @@
 +        mB_w13,
 +        tma_sfb_w13,
 +        mSFB_w13,
-@@ -4336,2 +4354,4 @@
+         tma_b_down: cute.CopyAtom,
+         mB_down: cute.Tensor,
+         tma_sfb_down: cute.CopyAtom,
+@@ -4333,8 +4351,10 @@
+             cpasync.prefetch_descriptor(tma_a32)
+             cpasync.prefetch_descriptor(tma_a16)
+             cpasync.prefetch_descriptor(tma_sfa)
 -            cpasync.prefetch_descriptor(tma_b_w13)
 -            cpasync.prefetch_descriptor(tma_sfb_w13)
 +            cpasync.prefetch_descriptor(tma_b_w13[0])
 +            cpasync.prefetch_descriptor(tma_b_w13[1])
 +            cpasync.prefetch_descriptor(tma_sfb_w13[0])
 +            cpasync.prefetch_descriptor(tma_sfb_w13[1])
-@@ -4566 +4586 @@
+             cpasync.prefetch_descriptor(tma_b_down)
+             cpasync.prefetch_descriptor(tma_sfb_down)
+
+@@ -4563,15 +4583,25 @@
+         # the physical N128 scale-factor block granularity and replayed for
+         # the two B halves.
+         gB_w13_tiled = cute.local_tile(
 -            mB_w13,
 +            mB_w13[0],
-@@ -4569,0 +4590,5 @@
+             cute.slice_(self.fc1_tile_shape_mnk, (0, None, None)),
+             (None, None, None),
+         )
 +        gB_w13_tiled_gate = cute.local_tile(
 +            mB_w13[1],
 +            cute.slice_(self.fc1_tile_shape_mnk, (0, None, None)),
 +            (None, None, None),
 +        )
-@@ -4574 +4599,6 @@
+         gSFA = cute.local_tile(
+             mSFA, cute.slice_(self.tile_shape_mnk, (None, 0, None)), (None, None, None)
+         )
+         gSFB_w13_tiled = cute.local_tile(
 -            mSFB_w13,
 +            mSFB_w13[0],
 +            self.fc1_sfb_tile_shape_nk,
@@ -110,12 +234,20 @@
 +        )
 +        gSFB_w13_tiled_gate = cute.local_tile(
 +            mSFB_w13[1],
-@@ -4640,2 +4670,2 @@
+             self.fc1_sfb_tile_shape_nk,
+             (None, None, None),
+         )
+@@ -4637,43 +4667,44 @@
+         tAgSFA = cute.filter_zeros(tAgSFA)
+
+         # w13 FC1 partitions: N64 B payload plus physical-N128 SFB payload.
 -        tBsB_w13, tBgB_w13 = cpasync.tma_partition(
 -            tma_b_w13,
 +        tBsB_w13, tBgB_gate = cpasync.tma_partition(
 +            tma_b_w13[1],
-@@ -4645,4 +4675,4 @@
+             b_cta_crd,
+             b_cta_layout,
+             cute.group_modes(sB_fc1, 0, 2),
 -            cute.group_modes(gB_w13_tiled, 0, 2),
 -        )
 -        tBsB_w13_up, _tBgB_w13_up = cpasync.tma_partition(
@@ -124,12 +256,18 @@
 +        )
 +        tBsB_w13_up, tBgB_up = cpasync.tma_partition(
 +            tma_b_w13[0],
-@@ -4654,2 +4684,2 @@
+             b_cta_crd,
+             b_cta_layout,
+             cute.group_modes(sB_up_fc1, 0, 2),
+             cute.group_modes(gB_w13_tiled, 0, 2),
+         )
 -        tBsSFB_w13, tBgSFB_w13 = cpasync.tma_partition(
 -            tma_sfb_w13,
 +        tBsSFB_w13, tBgSFB_gate = cpasync.tma_partition(
 +            tma_sfb_w13[1],
-@@ -4659,4 +4689,4 @@
+             b_cta_crd,
+             b_cta_layout,
+             cute.group_modes(sSFB_fc1, 0, 2),
 -            cute.group_modes(gSFB_w13_tiled, 0, 2),
 -        )
 -        tBsSFB_w13_up, _tBgSFB_w13_up = cpasync.tma_partition(
@@ -138,14 +276,32 @@
 +        )
 +        tBsSFB_w13_up, tBgSFB_up = cpasync.tma_partition(
 +            tma_sfb_w13[0],
-@@ -4669 +4699 @@
+             b_cta_crd,
+             b_cta_layout,
+             cute.group_modes(sSFB_up_fc1, 0, 2),
+             cute.group_modes(gSFB_w13_tiled, 0, 2),
+         )
+         tBsSFB_w13_up_extra, _tBgSFB_w13_up_extra = cpasync.tma_partition(
 -            tma_sfb_w13,
 +            tma_sfb_w13[0],
-@@ -4674,0 +4705 @@
+             b_cta_crd,
+             b_cta_layout,
+             cute.group_modes(sSFB_up_fc1_extra, 0, 2),
+             cute.group_modes(gSFB_w13_tiled, 0, 2),
+         )
 +        tBgB_w13 = (tBgB_up, tBgB_gate)
-@@ -4676 +4707 @@
+         tBsSFB_w13 = cute.filter_zeros(tBsSFB_w13)
 -        tBgSFB_w13 = cute.filter_zeros(tBgSFB_w13)
 +        tBgSFB_w13 = (cute.filter_zeros(tBgSFB_up), cute.filter_zeros(tBgSFB_gate))
-@@ -4883 +4914 @@
+         tBsSFB_w13_up = cute.filter_zeros(tBsSFB_w13_up)
+         tBsSFB_w13_up_extra = cute.filter_zeros(tBsSFB_w13_up_extra)
+
+@@ -4880,7 +4911,7 @@
+                     task_slice_count_val = _ld_shared_i32(ctrl_base_addr + Int32(20))
+                     task_valid_rows_val = _ld_shared_i32(ctrl_base_addr + Int32(24))
+
 -                    alpha_value = alpha[task_expert_idx].to(cutlass.Float32)
 +                    alpha_value = (alpha[2 * task_expert_idx].to(cutlass.Float32), alpha[2 * task_expert_idx + 1].to(cutlass.Float32))
+                     valid_rows = task_valid_rows_val
+                     # atom_layout=(4,2,1): two M16 fragments per warp, separated
+                     # by 64 rows. Full tasks use the original branch-free method.
