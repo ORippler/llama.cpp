@@ -5487,6 +5487,11 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
             }
 
             if (!with_bias && src0->type == GGML_TYPE_NVFP4 && src1->type == GGML_TYPE_F32 && mm_node->type == GGML_TYPE_F32) {
+                if (op == GGML_OP_MUL_MAT && ggml_cuda_nvfp4_get_layout(src0).data &&
+                        ggml_cuda_fusion_in_default_stream(*cuda_ctx, cgraph, i, n_ops) &&
+                        ggml_cuda_flashinfer_mul_mat_scale(*cuda_ctx, mm_node, scale, out_node)) {
+                    return n_ops - 1;
+                }
                 const int cc = ggml_cuda_info().devices[cuda_ctx->device].cc;
                 const bool is_id = op == GGML_OP_MUL_MAT_ID;
                 const int64_t ncols = is_id ? src1->ne[2] : src1->ne[1];

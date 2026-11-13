@@ -16,6 +16,11 @@ bool ggml_cuda_nvfp4_q4_allowed(const ggml_tensor * node) {
 }
 
 #ifndef GGML_CUDA_FLASHINFER
+bool ggml_cuda_flashinfer_mul_mat_scale(ggml_backend_cuda_context & ctx, const ggml_tensor * matmul, const ggml_tensor * scale, ggml_tensor * dst) {
+    GGML_UNUSED_VARS(ctx, matmul, scale, dst);
+    return false;
+}
+
 bool ggml_cuda_flashinfer_glu(ggml_backend_cuda_context & ctx, const ggml_tensor * up, const ggml_tensor * gate,
         const ggml_tensor * up_scale, const ggml_tensor * gate_scale, ggml_tensor * dst) {
     GGML_UNUSED_VARS(ctx, up, gate, up_scale, gate_scale, dst);

@@ -14,6 +14,7 @@
 struct ggml_cuda_flashinfer_state {
     tvm::ffi::Optional<tvm::ffi::Module> module;
     tvm::ffi::Function run;
+    tvm::ffi::Function run_16_2;
     tvm::ffi::Function gemm;
 
     ggml_cuda_flashinfer_state() {
@@ -24,11 +25,15 @@ struct ggml_cuda_flashinfer_state {
             if (function.has_value()) {
                 run = function.value();
             }
+            auto moe_attention = module.value()->GetFunction("ggml_flashinfer_fp8_h16_kv2_v1");
+            if (moe_attention.has_value()) {
+                run_16_2 = moe_attention.value();
+            }
             auto g = module.value()->GetFunction("ggml_flashinfer_nvfp4_gemm_v1");
             if (g.has_value()) {
                 gemm = g.value();
             }
-            GGML_LOG_INFO("ggml_cuda_flashinfer: loaded TVM FFI library (attention=%d, gemm=%d)\n", run.defined(), gemm.defined());
+            GGML_LOG_INFO("ggml_cuda_flashinfer: loaded TVM FFI library (attention_24_4=%d, attention_16_2=%d, gemm=%d)\n", run.defined(), run_16_2.defined(), gemm.defined());
         } catch (const std::exception & e) {
             GGML_LOG_WARN("ggml_cuda_flashinfer: TVM FFI unavailable: %s\n", e.what());
         }
@@ -72,15 +77,16 @@ bool ggml_cuda_flashinfer_candidate(int device, const ggml_tensor * dst) {
     if (dst->type != GGML_TYPE_F32 || q->type != GGML_TYPE_F32 ||
         k->type != GGML_TYPE_F8_E4M3 || v->type != GGML_TYPE_F8_E4M3 ||
         q->ne[0] != 256 || k->ne[0] != 256 || v->ne[0] != 256 ||
-        q->ne[2] != 24 || k->ne[2] != 4 || v->ne[2] != 4 ||
-        q->ne[1] < 128 || q->ne[1] > INT32_MAX/(24*256) || k->ne[1] > INT32_MAX ||
+        ((q->ne[2] != 24 || k->ne[2] != 4) && (q->ne[2] != 16 || k->ne[2] != 2)) ||
+        v->ne[2] != k->ne[2] ||
+        q->ne[1] < 128 || q->ne[1] > INT32_MAX/(q->ne[2]*256) || k->ne[1] > INT32_MAX ||
         q->ne[3] != 1 || k->ne[3] != 1 || v->ne[3] != 1 ||
-        dst->ne[0] != 256 || dst->ne[1] != 24 || dst->ne[2] != q->ne[1] || dst->ne[3] != 1 ||
+        dst->ne[0] != 256 || dst->ne[1] != q->ne[2] || dst->ne[2] != q->ne[1] || dst->ne[3] != 1 ||
         q->nb[0] != sizeof(float) || k->ne[1] != v->ne[1] || !ggml_is_contiguous(dst)) {
         return false;
     }
     for (const ggml_tensor * t : {k, v}) {
-        if (t->nb[0] != 1 || t->nb[2] != 256 || t->nb[1] != 4*256 || (uintptr_t) t->data % 16 != 0) {
+        if (t->nb[0] != 1 || t->nb[2] != 256 || t->nb[1] != size_t(k->ne[2])*256 || (uintptr_t) t->data % 16 != 0) {
             return false;
         }
     }
@@ -96,12 +102,12 @@ size_t ggml_cuda_flashinfer_get_alloc_size(const ggml_tensor * dst) {
 }
 
 static __global__ void flashinfer_pack_q(
-        const char * q, uint8_t * packed, int32_t * seq_lens, int n_queries, int n_kv, size_t nb1, size_t nb2) {
+        const char * q, uint8_t * packed, int32_t * seq_lens, int n_queries, int n_kv, int n_heads, size_t nb1, size_t nb2) {
     const int i = blockIdx.x*blockDim.x + threadIdx.x;
-    if (i < n_queries*24*256) {
+    if (i < n_queries*n_heads*256) {
         const int d = i % 256;
-        const int h = i / 256 % 24;
-        const int t = i / (256*24);
+        const int h = i / 256 % n_heads;
+        const int t = i / (256*n_heads);
         packed[i] = ggml_cuda_fp32_to_f8_e4m3(*(const float *) (q + t*nb1 + h*nb2 + d*sizeof(float)));
     }
     if (i == 0) {
@@ -128,7 +134,8 @@ bool ggml_cuda_flashinfer(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         ctx.flashinfer = flashinfer_state();
     }
 
-    if (!ctx.flashinfer->run.defined()) {
+    const auto & run = q->ne[2] == 24 ? ctx.flashinfer->run : ctx.flashinfer->run_16_2;
+    if (!run.defined()) {
         return false;
     }
 
@@ -139,13 +146,13 @@ bool ggml_cuda_flashinfer(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     auto * seq_lens = (int32_t *) ((char *) output + GGML_PAD(n*sizeof(nv_bfloat16), 128));
     const int n_queries = q->ne[1];
     flashinfer_pack_q<<<(n + 255)/256, 256, 0, ctx.stream()>>>(
-        (const char *) q->data, packed_q, seq_lens, n_queries, n_kv, q->nb[1], q->nb[2]);
+        (const char *) q->data, packed_q, seq_lens, n_queries, n_kv, q->ne[2], q->nb[1], q->nb[2]);
     CUDA_CHECK(cudaGetLastError());
 
-    int64_t q_shape[] = {n_queries, 24, 256};
-    int64_t kv_shape[] = {n_kv, 4, 256};
-    int64_t q_strides[] = {24*256, 256, 1};
-    int64_t kv_strides[] = {4*256, 256, 1};
+    int64_t q_shape[] = {n_queries, q->ne[2], 256};
+    int64_t kv_shape[] = {n_kv, k->ne[2], 256};
+    int64_t q_strides[] = {q->ne[2]*256, 256, 1};
+    int64_t kv_strides[] = {k->ne[2]*256, 256, 1};
     int64_t cu_shape[] = {2};
     int64_t cu_strides[] = {1};
     const DLDevice device = {kDLCUDA, ctx.device};
@@ -158,7 +165,7 @@ bool ggml_cuda_flashinfer(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     DLTensor cu_k = {seq_lens + 2, device, 1, {kDLInt, 32, 1}, cu_shape, cu_strides, 0};
     const float scale_log2 = ggml_get_op_params_f32(dst, 0)*1.4426950408889634f;
     flashinfer_stream_guard stream_guard(ctx.device, ctx.stream());
-    ctx.flashinfer->run(&q_arg, &k_arg, &v_arg, &o_arg, &cu_q, &cu_k, scale_log2, n_queries);
+    run(&q_arg, &k_arg, &v_arg, &o_arg, &cu_q, &cu_k, scale_log2, n_queries);
     ggml_get_to_fp32_cuda(GGML_TYPE_BF16)(output, (float *) dst->data, n, ctx.stream());
     return true;
 }
@@ -167,9 +174,8 @@ static __global__ void flashinfer_row_scale(float * output, const nv_bfloat16 * 
         const nv_bfloat16 * gate, const float * up_scale, const float * gate_scale, int64_t n, int64_t count) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i < count) {
-        float value = __bfloat162float(source[i]) * scales[i / n];
+        float value = __bfloat162float(source[i]) * scales[i / n] * (up_scale ? *up_scale : 1.0f);
         if (gate) {
-            value *= up_scale ? *up_scale : 1.0f;
             const float g = __bfloat162float(gate[i]) * scales[i / n] * (gate_scale ? *gate_scale : 1.0f);
             value *= g / (1.0f + expf(-g));
         }
@@ -250,6 +256,14 @@ static bool flashinfer_mul_mat(ggml_backend_cuda_context & ctx,
 
 bool ggml_cuda_flashinfer_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * weight, const ggml_tensor * input, ggml_tensor * dst) {
     return flashinfer_mul_mat(ctx, weight, input, dst, dst);
+}
+
+bool ggml_cuda_flashinfer_mul_mat_scale(ggml_backend_cuda_context & ctx, const ggml_tensor * matmul, const ggml_tensor * scale, ggml_tensor * dst) {
+    if (matmul->op != GGML_OP_MUL_MAT || matmul->type != GGML_TYPE_F32 ||
+            !scale || scale->type != GGML_TYPE_F32 || !ggml_is_contiguous(scale) || ggml_nelements(scale) != 1) {
+        return false;
+    }
+    return flashinfer_mul_mat(ctx, matmul->src[0], matmul->src[1], dst, matmul, nullptr, scale);
 }
 
 bool ggml_cuda_flashinfer_glu(ggml_backend_cuda_context & ctx, const ggml_tensor * up, const ggml_tensor * gate,

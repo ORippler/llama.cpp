@@ -3584,7 +3584,8 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * flash_attn = nullptr;
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, kv_rows, sinks, v_mla, 0, kq_scale, il, &flash_attn);
 #ifdef GGML_USE_CUDA_FLASHINFER
-    if (flash_attn && q->ne[2] >= 128 && q->ne[1] == 24 && q->ne[0] == 256 &&
+    if (flash_attn && q->ne[2] >= 128 && q->ne[0] == 256 &&
+        ((q->ne[1] == 24 && k->ne[1] == 4) || (q->ne[1] == 16 && k->ne[1] == 2)) &&
         k->type == GGML_TYPE_F8_E4M3 && v->type == GGML_TYPE_F8_E4M3) {
         inp->flash_attn.push_back(flash_attn);
     }

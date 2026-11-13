@@ -9343,8 +9343,8 @@ struct test_flash_attn_ext_causal : public test_flash_attn_ext {
     const int32_t causal_seq_len;
     const bool hint;
 
-    test_flash_attn_ext_causal(int64_t nq, int64_t capacity, int32_t causal_seq_len, bool hint = true, bool strided = false)
-        : test_flash_attn_ext(256, 256, 4, {6, 1}, capacity, nq, true, false, 0, 0, GGML_PREC_F32,
+    test_flash_attn_ext_causal(int64_t nq, int64_t capacity, int32_t causal_seq_len, bool hint = true, bool strided = false, int64_t kv_heads = 4, int64_t gqa = 6)
+        : test_flash_attn_ext(256, 256, kv_heads, {gqa, 1}, capacity, nq, true, false, 0, 0, GGML_PREC_F32,
             GGML_TYPE_F8_E4M3, GGML_TYPE_F8_E4M3, strided ? std::array<int32_t, 4>{0, 1, 2, 3} : std::array<int32_t, 4>{0, 2, 1, 3}, false),
           causal_seq_len(causal_seq_len), hint(hint) {}
 
@@ -13487,11 +13487,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {4, 1},  512, 8, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true));
     test_cases.emplace_back(new test_flash_attn_ext(64,  64,  4, {1, 1},  512, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, true, true));
 
-    for (const auto & shape : {std::array<int32_t, 3>{128, 256, 129}, {512, 512, 512}, {512, 8192, 8192}, {1, 8192, 8192}}) {
-        test_cases.emplace_back(new test_flash_attn_ext_causal(shape[0], shape[1], shape[2]));
+    for (const auto & heads : {std::array<int64_t, 2>{4, 6}, {2, 8}}) {
+        for (const auto & shape : {std::array<int32_t, 3>{128, 256, 129}, {512, 512, 512}, {512, 8192, 8192}, {1, 8192, 8192}}) {
+            test_cases.emplace_back(new test_flash_attn_ext_causal(shape[0], shape[1], shape[2], true, false, heads[0], heads[1]));
+        }
+        test_cases.emplace_back(new test_flash_attn_ext_causal(128, 256, 129, false, false, heads[0], heads[1]));
+        test_cases.emplace_back(new test_flash_attn_ext_causal(128, 256, 129, true, true, heads[0], heads[1]));
     }
-    test_cases.emplace_back(new test_flash_attn_ext_causal(128, 256, 129, false));
-    test_cases.emplace_back(new test_flash_attn_ext_causal(128, 256, 129, true, true));
 
     // large-KV F16 cases (Qwen3.6-27B geometry and a llama-class control): the upstream matrix
     // stops at kv=1024, blind to long-context FA bugs (e.g. the oneDNN SDPA ordering race on BMG).
@@ -13683,6 +13685,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_NVFP4,  GGML_GLU_OP_SWIGLU,       150,  6912, 256, false, 1, 1, false, false, true, true,  { 2, 3 }));
     // NVFP4 weight scale without gate/up: MMQ applies it in the write-back, the trailing bias add stays a separate node
     test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_NVFP4,  GGML_GLU_OP_SWIGLU,       150,  2560, 256, false, 1, 1, false, false, false, true, { 1, 1 }));
+    for (int64_t m : {128, 512}) {
+        test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_NVFP4, GGML_GLU_OP_SWIGLU, m, 256, 2048, false, 1, 1, false, false, false, true, {1, 1}));
+    }
     test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_NVFP4,  GGML_GLU_OP_SWIGLU,       150,  2560, 256, true, 16, 8, false, false, false, true));
     // Same pattern with broadcast input, 4 of 16 experts used, 8-bit activations (W4A8), and Q4_K, which keeps the scale as a separate node
     test_cases.emplace_back(new test_mul_mat_fusion(GGML_TYPE_NVFP4,  GGML_GLU_OP_SWIGLU,       150,  2560, 256, true, 16, 8, true,  false, false, true));

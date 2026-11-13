@@ -17,6 +17,7 @@ void ggml_cuda_nvfp4_get(const ggml_cuda_nvfp4_layout & layout, void * dst, size
 void ggml_cuda_nvfp4_unpack(const ggml_cuda_nvfp4_layout & layout, void * dst, size_t offset, size_t size, cudaStream_t stream);
 void ggml_cuda_nvfp4_pack(const ggml_cuda_nvfp4_layout & layout, const void * src, size_t offset, size_t size, cudaStream_t stream);
 bool ggml_cuda_flashinfer_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor * weight, const ggml_tensor * input, ggml_tensor * dst);
+bool ggml_cuda_flashinfer_mul_mat_scale(ggml_backend_cuda_context & ctx, const ggml_tensor * matmul, const ggml_tensor * scale, ggml_tensor * dst);
 bool ggml_cuda_flashinfer_glu(ggml_backend_cuda_context & ctx, const ggml_tensor * up, const ggml_tensor * gate,
         const ggml_tensor * up_scale, const ggml_tensor * gate_scale, ggml_tensor * dst);
 

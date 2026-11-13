@@ -33,7 +33,8 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     objects = []
     if args.kernels in ("attention", "all"):
-        objects.append(export_attention(args.output_dir))
+        for q_heads, kv_heads in ((24, 4), (16, 2)):
+            objects.append(export_attention(args.output_dir, q_heads, kv_heads))
     if args.kernels in ("gemm", "all"):
         objects.append(export_gemm(args.output_dir, args.max_active_clusters))
     if args.kernels in ("moe", "all"):
@@ -49,7 +50,7 @@ def main():
                     *[f"-l:{lib.name}" for lib in libraries]], check=True)
 
 
-def export_attention(output_dir):
+def export_attention(output_dir, q_heads, kv_heads):
     import cutlass
     import cutlass.cute as cute
     from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
@@ -69,14 +70,15 @@ def export_attention(output_dir):
              None, cu_q, None, cu_k, max_q, False)
 
     q_len, k_len = cute.sym_int(), cute.sym_int()
-    q = make_fake_compact_tensor(cutlass.Float8E4M3FN, (q_len, 24, 256), stride_order=(2, 1, 0), assumed_align=16)
-    k = make_fake_compact_tensor(cutlass.Float8E4M3FN, (k_len, 4, 256), stride_order=(2, 1, 0), assumed_align=16)
-    o = make_fake_compact_tensor(cutlass.BFloat16, (q_len, 24, 256), stride_order=(2, 1, 0), assumed_align=16)
+    q = make_fake_compact_tensor(cutlass.Float8E4M3FN, (q_len, q_heads, 256), stride_order=(2, 1, 0), assumed_align=16)
+    k = make_fake_compact_tensor(cutlass.Float8E4M3FN, (k_len, kv_heads, 256), stride_order=(2, 1, 0), assumed_align=16)
+    o = make_fake_compact_tensor(cutlass.BFloat16, (q_len, q_heads, 256), stride_order=(2, 1, 0), assumed_align=16)
     cu = make_fake_compact_tensor(cutlass.Int32, (2,), assumed_align=4)
     compiled = cute.compile(launch, q, k, k, o, cu, cu, cutlass.Float32(1.0), cutlass.Int32(1),
                             make_fake_stream(use_tvm_ffi_env_stream=True), options="--gpu-arch sm_120a --enable-tvm-ffi")
-    object_path = output_dir / "ggml_flashinfer_fp8.o"
-    compiled.export_to_c(str(object_path), function_name="ggml_flashinfer_fp8_v1")
+    symbol = "ggml_flashinfer_fp8_v1" if (q_heads, kv_heads) == (24, 4) else "ggml_flashinfer_fp8_h16_kv2_v1"
+    object_path = output_dir / f"{symbol}.o"
+    compiled.export_to_c(str(object_path), function_name=symbol)
     return object_path
 
 
