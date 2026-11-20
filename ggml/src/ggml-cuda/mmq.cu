@@ -2,6 +2,7 @@
 #include "mmq.cuh"
 #include "quantize.cuh"
 #include "mmid.cuh"
+#include "nvfp4-flashinfer.cuh"
 
 #include <cstdint>
 
@@ -164,9 +165,20 @@ static int ggml_cuda_mmq_get_J_best(
 void ggml_cuda_mul_mat_q(
         ggml_backend_cuda_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids, ggml_tensor * dst,
         const ggml_cuda_mm_fusion_args_host * fusion) {
+    ggml_cuda_nvfp4_unpacked unpacked(ctx, src0);
+    src0 = unpacked.get();
     GGML_ASSERT(        src1->type == GGML_TYPE_F32);
     GGML_ASSERT(        dst->type  == GGML_TYPE_F32);
     GGML_ASSERT(!ids || ids->type  == GGML_TYPE_I32); // Optional, used for batched GGML_MUL_MAT_ID.
+
+    std::unique_ptr<ggml_cuda_nvfp4_unpacked> unpacked_gate;
+    ggml_cuda_mm_fusion_args_host fusion_local;
+    if (fusion && ggml_cuda_nvfp4_get_layout(fusion->gate).data) {
+        unpacked_gate = std::make_unique<ggml_cuda_nvfp4_unpacked>(ctx, fusion->gate);
+        fusion_local = *fusion;
+        fusion_local.gate = unpacked_gate->get();
+        fusion = &fusion_local;
+    }
 
     // Fused gate/up/GLU: src0 is the up weight, dst the GLU output.
     // Fused scale (no gate): dst is the MUL that applies the weight scale to the MUL_MAT.
