@@ -26,6 +26,7 @@
 #include "ggml-cuda/cross-entropy-loss.cuh"
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/diag.cuh"
+#include "ggml-cuda/fattn-flashinfer.cuh"
 #include "ggml-cuda/fattn.cuh"
 #include "ggml-cuda/fp8.cuh"
 #include "ggml-cuda/fwht.cuh"
@@ -3359,10 +3360,21 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
             GGML_LOG_DEBUG("CUDA Graph id %zu reused\n", cgraph->uid);
         }
         GGML_ASSERT((int)graph->node_props.size() == cgraph->n_nodes);
-        return false;
+#ifdef GGML_CUDA_FLASHINFER
+        // The llama graph can update the causal length while keeping the same graph ID.
+        for (const auto & [node, n_kv] : graph->flashinfer_causal_lengths) {
+            res |= ggml_get_op_params_i32(node, 5) != n_kv;
+        }
+#endif
+        if (!res) {
+            return false;
+        }
     }
 
     graph->uid = cgraph->uid;
+#ifdef GGML_CUDA_FLASHINFER
+    graph->flashinfer_causal_lengths.clear();
+#endif
 
     // Check if the graph size has changed
     if ((int)graph->node_props.size() != cgraph->n_nodes) {
@@ -3371,6 +3383,12 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
     }
 
     for (int i = 0; i < cgraph->n_nodes; i++) {
+#ifdef GGML_CUDA_FLASHINFER
+        const auto * node = cgraph->nodes[i];
+        if (node->op == GGML_OP_FLASH_ATTN_EXT && ggml_cuda_flashinfer_candidate(cuda_ctx->device, node)) {
+            graph->flashinfer_causal_lengths.emplace_back(node, ggml_get_op_params_i32(node, 5));
+        }
+#endif
         ggml_cuda_graph::node_properties prop = {};
         memcpy(&prop.node, cgraph->nodes[i], sizeof(ggml_tensor));
 

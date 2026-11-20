@@ -135,6 +135,33 @@ if (CUDAToolkit_FOUND)
 
     target_link_libraries(ggml-cuda PRIVATE ${CMAKE_DL_LIBS})
 
+    if (GGML_CUDA_FLASHINFER)
+        if (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_CROSSCOMPILING OR NOT GGML_CUDA_FA)
+            message(FATAL_ERROR "GGML_CUDA_FLASHINFER requires a native Linux build with GGML_CUDA_FA")
+        endif()
+        if (CUDAToolkit_VERSION VERSION_LESS "13.0")
+            message(FATAL_ERROR "GGML_CUDA_FLASHINFER requires CUDA 13 or newer")
+        endif()
+        set(GGML_CUDA_FLASHINFER_LIBRARY "" CACHE FILEPATH "Prebuilt FlashInfer TVM FFI kernel library")
+        set(GGML_CUDA_FLASHINFER_TVM_FFI_ROOT "" CACHE PATH "TVM FFI installation prefix")
+        if (NOT EXISTS "${GGML_CUDA_FLASHINFER_LIBRARY}")
+            message(FATAL_ERROR "Set GGML_CUDA_FLASHINFER_LIBRARY to the prebuilt TVM FFI kernel library")
+        endif()
+        find_path(FLASHINFER_TVM_FFI_INCLUDE_DIR tvm/ffi/function.h
+            HINTS "${GGML_CUDA_FLASHINFER_TVM_FFI_ROOT}" PATH_SUFFIXES include REQUIRED)
+        find_path(FLASHINFER_DLPACK_INCLUDE_DIR dlpack/dlpack.h
+            HINTS "${GGML_CUDA_FLASHINFER_TVM_FFI_ROOT}"
+            PATH_SUFFIXES include 3rdparty/dlpack/include REQUIRED)
+        find_library(FLASHINFER_TVM_FFI_LIBRARY tvm_ffi
+            HINTS "${GGML_CUDA_FLASHINFER_TVM_FFI_ROOT}" PATH_SUFFIXES lib lib64 REQUIRED)
+        get_filename_component(FLASHINFER_LIBRARY_PATH "${GGML_CUDA_FLASHINFER_LIBRARY}" ABSOLUTE)
+        target_include_directories(ggml-cuda SYSTEM PRIVATE
+            "${FLASHINFER_TVM_FFI_INCLUDE_DIR}" "${FLASHINFER_DLPACK_INCLUDE_DIR}")
+        target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_FLASHINFER
+            GGML_CUDA_FLASHINFER_LIBRARY="${FLASHINFER_LIBRARY_PATH}")
+        target_link_libraries(ggml-cuda PRIVATE "${FLASHINFER_TVM_FFI_LIBRARY}")
+    endif()
+
     if (GGML_CUDA_GRAPHS)
         add_compile_definitions(GGML_CUDA_USE_GRAPHS)
     endif()

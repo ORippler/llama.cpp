@@ -61,6 +61,9 @@ struct ggml_cuda_graph {
         size_t   node_src_nb[GGML_MAX_SRC][GGML_MAX_DIMS];
     };
     std::vector<node_properties> node_props;
+#ifdef GGML_CUDA_FLASHINFER
+    std::vector<std::pair<const ggml_tensor *, int32_t>> flashinfer_causal_lengths;
+#endif
 
     bool is_enabled() const {
         static const bool disable_cuda_graphs_due_to_env = (getenv("GGML_CUDA_DISABLE_GRAPHS") != nullptr);

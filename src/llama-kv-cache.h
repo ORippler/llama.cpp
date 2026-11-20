@@ -193,6 +193,7 @@ public:
     //
 
     uint32_t get_n_kv(const slot_info & sinfo) const;
+    int32_t get_causal_prefix(const llama_ubatch & ubatch, const slot_info & sinfo, uint32_t n_kv) const;
 
     // attention over the cells of each sequence of the ubatch instead of the whole cache (see ggml_flash_attn_ext_rows)
     // the ubatch splits into n_slices groups of tokens with one sequence each
@@ -418,6 +419,7 @@ public:
     //
 
     uint32_t get_n_kv() const;
+    int32_t get_causal_prefix(const llama_ubatch & ubatch) const;
     uint32_t get_n_kv_rows() const;
 
     ggml_type type_k() const;

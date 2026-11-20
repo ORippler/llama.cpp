@@ -9265,6 +9265,45 @@ struct test_flash_attn_ext_mask_bcast : public test_flash_attn_ext {
     }
 };
 
+struct test_flash_attn_ext_causal : public test_flash_attn_ext {
+    const int32_t causal_seq_len;
+    const bool hint;
+
+    test_flash_attn_ext_causal(int64_t nq, int64_t capacity, int32_t causal_seq_len, bool hint = true, bool strided = false, int64_t kv_heads = 4, int64_t gqa = 6)
+        : test_flash_attn_ext(256, 256, kv_heads, {gqa, 1}, capacity, nq, true, false, 0, 0, GGML_PREC_F32,
+            GGML_TYPE_F8_E4M3, GGML_TYPE_F8_E4M3, strided ? std::array<int32_t, 4>{0, 1, 2, 3} : std::array<int32_t, 4>{0, 2, 1, 3}, false),
+          causal_seq_len(causal_seq_len), hint(hint) {}
+
+    std::string vars() override {
+        return test_flash_attn_ext::vars() + ",causal_seq_len=" + std::to_string(causal_seq_len) + ",hint=" + std::to_string(hint);
+    }
+
+    double max_nmse_err() override {
+        // Native FP8 attention also rounds Q and the attention probabilities.
+        return 1e-3;
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * out = test_flash_attn_ext::build_graph(ctx);
+        if (hint) {
+            ggml_flash_attn_ext_set_causal_seq_len(out, causal_seq_len);
+        }
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        test_flash_attn_ext::initialize_tensors(ctx);
+        ggml_tensor * m = ggml_get_tensor(ctx, "m");
+        std::vector<ggml_fp16_t> values(ggml_nelements(m));
+        for (int64_t i = 0; i < nb; ++i) {
+            for (int64_t j = 0; j < kv; ++j) {
+                values[i*kv + j] = ggml_fp32_to_fp16(j < causal_seq_len - nb + i + 1 ? 0.0f : -INFINITY);
+            }
+        }
+        ggml_backend_tensor_set(m, values.data(), 0, ggml_nbytes(m));
+    }
+};
+
 // GGML_OP_FLASH_ATTN_EXT with kv_rows: each q slice attends to its own list of K/V cache rows
 struct test_flash_attn_ext_kv_rows : public test_case {
     const int64_t hs;
@@ -13360,6 +13399,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_flash_attn_ext(192, 128, 4, {8, 1},  512, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true));
     test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, {4, 1},  512, 8, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, {0, 1, 2, 3}, true, true));
     test_cases.emplace_back(new test_flash_attn_ext(64,  64,  4, {1, 1},  512, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, {0, 1, 2, 3}, true, true));
+
+    for (const auto & heads : {std::array<int64_t, 2>{4, 6}, {2, 8}}) {
+        for (const auto & shape : {std::array<int32_t, 3>{128, 256, 129}, {512, 512, 512}, {512, 8192, 8192}, {1, 8192, 8192}}) {
+            test_cases.emplace_back(new test_flash_attn_ext_causal(shape[0], shape[1], shape[2], true, false, heads[0], heads[1]));
+        }
+        test_cases.emplace_back(new test_flash_attn_ext_causal(128, 256, 129, false, false, heads[0], heads[1]));
+        test_cases.emplace_back(new test_flash_attn_ext_causal(128, 256, 129, true, true, heads[0], heads[1]));
+    }
 
     // large-KV F16 cases (Qwen3.6-27B geometry and a llama-class control): the upstream matrix
     // stops at kv=1024, blind to long-context FA bugs (e.g. the oneDNN SDPA ordering race on BMG).

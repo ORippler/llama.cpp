@@ -2,6 +2,8 @@
 
 List of GGML operations and backend support status.
 
+CUDA `FLASH_ATTN_EXT` has an optional SM120/SM121 FP8 prefill implementation. See [FlashInfer build options](build.md#experimental-flashinfer-prefill-on-sm120sm121) for its shape and mask restrictions. The causal sequence length is a validated execution hint; other backends retain the explicit mask semantics.
+
 ## How to add a backend to this table:
 
 1. Run `test-backend-ops support --output csv` with your backend name and redirect output to a csv file in `docs/ops/` (e.g., `docs/ops/CUDA.csv`)

@@ -1310,6 +1310,48 @@ uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
     return result;
 }
 
+// The query slots must be the tail of the visible prefix in physical cache order.
+int32_t llama_kv_cache::get_causal_prefix(const llama_ubatch & ubatch, const slot_info & sinfo, uint32_t n_kv) const {
+    const uint32_t nq = ubatch.n_tokens;
+    if (nq == 0 || ubatch.n_seqs_unq != 1 || sinfo.empty() || sinfo.n_stream() != 1 || sinfo.s0 != sinfo.s1 ||
+            sinfo.size() != nq || !sinfo.is_contiguous() || swa_type != LLAMA_SWA_TYPE_NONE ||
+            hparams.f_max_alibi_bias != 0.0f || n_kv > INT32_MAX) {
+        return 0;
+    }
+
+    const auto seq_id = ubatch.seq_id_unq[0];
+    const auto & cells = get_cells(seq_id);
+    const uint32_t head = sinfo.head();
+    if (sinfo.strm[0] < 0 || uint32_t(sinfo.strm[0]) != sinfo.s0 || sinfo.s0 != get_stream(seq_id) ||
+            n_kv > cells.size() || head > n_kv || nq > n_kv - head) {
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < head; ++i) {
+        if (cells.is_empty(i) || !cells.seq_has(i, seq_id) || cells.pos_get(i) >= ubatch.pos[0]) {
+            return 0;
+        }
+    }
+    for (uint32_t i = 0; i < nq; ++i) {
+        const uint32_t cell = head + i;
+        if (ubatch.seq_id[i][0] != seq_id || (i > 0 && ubatch.pos[i] <= ubatch.pos[i - 1]) ||
+                cells.is_empty(cell) || !cells.seq_has(cell, seq_id) || cells.pos_get(cell) != ubatch.pos[i] ||
+                (ubatch.is_pos_2d() && cells.ext_get(cell).is_2d_gt(ubatch.pos[i + size_t(nq)*2], ubatch.pos[i + nq]))) {
+            return 0;
+        }
+    }
+
+    const uint32_t end = head + nq;
+    const uint32_t used_end = std::min(n_kv, cells.used_max_p1());
+    for (uint32_t i = end; i < used_end; ++i) {
+        if (!cells.is_empty(i) && cells.seq_has(i, seq_id) && cells.pos_get(i) <= ubatch.pos[nq - 1]) {
+            return 0;
+        }
+    }
+
+    return static_cast<int32_t>(end);
+}
+
 uint32_t llama_kv_cache::get_n_kv_slices(const llama_ubatch & ubatch) {
     if (ubatch.n_seqs_unq == 1) {
         return 1;
@@ -3050,6 +3092,10 @@ const llama_ubatch & llama_kv_cache_context::get_ubatch() const {
 
 uint32_t llama_kv_cache_context::get_n_kv() const {
     return n_kv;
+}
+
+int32_t llama_kv_cache_context::get_causal_prefix(const llama_ubatch & ubatch) const {
+    return ubatches.empty() ? 0 : kv->get_causal_prefix(ubatch, sinfos[i_cur], n_kv);
 }
 
 uint32_t llama_kv_cache_context::get_n_kv_rows() const {

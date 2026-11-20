@@ -676,6 +676,22 @@ void llm_graph_input_attn_no_cache::set_input(const llama_ubatch * ubatch) {
     }
 }
 
+void llm_graph_input_attn_kv::update_causal_mask_hint(const llama_kv_cache_context & cache, const llama_ubatch & ubatch) {
+    if (flash_attn.empty()) {
+        return;
+    }
+
+    const auto * mask = self_attn_mask.raw;
+    const int32_t n_kv = cparams.causal_attn && !cparams.training && !self_attn_mask.rows &&
+            !self_attn_mask.block_uniform && mask && mask->type == GGML_TYPE_F16 &&
+            mask->ne[0] == cache.get_n_kv() && mask->ne[2] == 1 && mask->ne[3] == 1
+        ? cache.get_causal_prefix(ubatch) : 0;
+    for (auto * attn : flash_attn) {
+        const bool matches = attn->src[0]->ne[1] == ubatch.n_tokens && attn->src[1]->ne[1] == cache.get_n_kv();
+        ggml_flash_attn_ext_set_causal_seq_len(attn, n_kv && matches ? n_kv : 0);
+    }
+}
+
 void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
     // the idxs are left unallocated when the KV cache is bypassed during training
     if (self_k_idxs && self_k_idxs->buffer) {
@@ -689,6 +705,9 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
     // (e.g. DFlash's KV-injection pass)
     if (self_attn_mask.raw && self_attn_mask.raw->buffer) {
         mctx->set_input_attn_mask(self_attn_mask, ubatch, cparams.causal_attn);
+#ifdef GGML_USE_CUDA_FLASHINFER
+        update_causal_mask_hint(*mctx, *ubatch);
+#endif
     }
 }
 
@@ -1248,6 +1267,9 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
 
     // kv_rows and the mask stay unallocated if all attention layers have their own (e.g. qwen4exp QSA)
     mctx->get_attn()->set_input_attn_mask(inp_attn->self_attn_mask, ubatch, cparams.causal_attn);
+#ifdef GGML_USE_CUDA_FLASHINFER
+    inp_attn->update_causal_mask_hint(*mctx->get_attn(), *ubatch);
+#endif
 
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
 
@@ -3181,7 +3203,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * v_mla,
              int64_t   n_kv_max,
                float   kq_scale,
-                 int   il) const {
+                 int   il,
+        ggml_tensor ** flash_attn) const {
     const bool v_trans = v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
@@ -3222,6 +3245,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         } else {
             cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
                                       hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
+        }
+        if (flash_attn && !kv_rows) {
+            *flash_attn = cur;
         }
         res->add_fused_node({kv_rows ? LLM_FUSED_OP_FLASH_ATTN_KV_ROWS : LLM_FUSED_OP_FLASH_ATTN, cur, il});
 
@@ -3533,7 +3559,15 @@ ggml_tensor * llm_graph_context::build_attn(
     const auto & kq_mask = inp->self_attn_mask.raw;
     const auto & kv_rows = inp->self_attn_mask.rows;
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, kv_rows, sinks, v_mla, 0, kq_scale, il);
+    ggml_tensor * flash_attn = nullptr;
+    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, kv_rows, sinks, v_mla, 0, kq_scale, il, &flash_attn);
+#ifdef GGML_USE_CUDA_FLASHINFER
+    if (flash_attn && q->ne[2] >= 128 && q->ne[0] == 256 &&
+        ((q->ne[1] == 24 && k->ne[1] == 4) || (q->ne[1] == 16 && k->ne[1] == 2)) &&
+        k->type == GGML_TYPE_F8_E4M3 && v->type == GGML_TYPE_F8_E4M3) {
+        inp->flash_attn.push_back(flash_attn);
+    }
+#endif
     cur = build_attn_scale_kv_output(ctx0, mctx_cur, cur, il);
     cb(cur, "kqv_out", il);
 

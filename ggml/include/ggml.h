@@ -2275,6 +2275,12 @@ extern "C" {
             struct ggml_tensor * a,
             int32_t              n_kv_max);
 
+    // Optional hint: mask is bottom-right causal over this KV prefix, with the remaining columns masked.
+    // The caller must guarantee this layout and update the hint when inputs change. Zero disables the hint.
+    GGML_API void ggml_flash_attn_ext_set_causal_seq_len(
+            struct ggml_tensor * a,
+            int32_t              n_kv);
+
     GGML_API void ggml_flash_attn_ext_add_sinks(
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);

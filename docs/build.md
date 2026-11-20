@@ -197,6 +197,38 @@ cmake --build build --config Release
 
 To use a specific CCCL version instead of the one bundled with the installed CUDA Toolkit, add `-DGGML_CUDA_CCCL_VERSION=vMAJOR.MINOR.PATCH`. CUB DeviceTopK requires CCCL 3.4.3 or newer; older versions use the sort fallback.
 
+#### Experimental FlashInfer prefill on SM120/SM121
+
+`GGML_CUDA_FLASHINFER=ON` enables an optional SM120/SM121 prefill adapter for FP8 E4M3 K/V, 24 query heads / 4 KV heads or 16 query heads / 2 KV heads, both with head dimension 256. It handles one stream with at least 128 queries when the KV cache metadata proves a contiguous causal prefix. Decode, other masks, and other attention shapes use the existing CUDA kernels. KV scales remain in the llama graph; the adapter converts Q to unscaled E4M3 and converts the BF16 result to F32.
+
+This requires native Linux, CUDA Toolkit 13 or newer, a prebuilt FlashInfer TVM FFI kernel library, and TVM FFI headers/runtime. Build the attention artifact separately using FlashInfer v0.7.4 pinned to `77039051b0be921788dc2784ec41423b558878ec`. The llama.cpp build and inference do not invoke Python or the CuTe compiler.
+
+```bash
+/path/to/python -m pip install flashinfer-python==0.7.4 nvidia-cutlass-dsl==4.8.1 nvidia-cutlass-dsl-libs-cu13==4.8.1 apache-tvm-ffi==0.1.15.post1
+git clone https://github.com/flashinfer-ai/flashinfer.git /path/to/flashinfer
+git -C /path/to/flashinfer checkout v0.7.4
+/path/to/python ggml/src/ggml-cuda/flashinfer_export.py \
+    --source-dir /path/to/flashinfer --output-dir /path/to/flashinfer-kernels
+```
+
+Use `--gpu-arch sm_120f` for SM120 and SM121 device code, or select `sm_120a` (the default) or `sm_121a` for a specific GPU. Build the host libraries for the target machine's architecture.
+
+The exporter produces `libggml_flashinfer_fp8.so` with `ggml_flashinfer_fp8_v1` for 24/4 heads and `ggml_flashinfer_fp8_h16_kv2_v1` for 16/2 heads. It copies the CuTe and TVM FFI runtime libraries beside the artifact. Q and KV lengths remain dynamic. A missing export uses native attention for that geometry.
+
+Configure llama.cpp with the artifact and a TVM FFI installation prefix containing `include/tvm/ffi`, `include/dlpack` (or `3rdparty/dlpack/include`), and `lib/libtvm_ffi.so`. For a wheel installation, this prefix is the `tvm_ffi` package directory. Use the same TVM FFI runtime version for artifact production and consumption.
+
+```bash
+cmake -B build -DGGML_CUDA=ON -DGGML_CUDA_FLASHINFER=ON \
+    -DGGML_CUDA_FLASHINFER_LIBRARY=/path/to/flashinfer-kernels/libggml_flashinfer_fp8.so \
+    -DGGML_CUDA_FLASHINFER_TVM_FFI_ROOT=/path/to/tvm_ffi \
+    -DCMAKE_CUDA_ARCHITECTURES=120a-real
+cmake --build build --config Release
+```
+
+At runtime, `GGML_CUDA_FLASHINFER_LIBRARY` can override the configured kernel path. A library load failure logs a warning and uses the existing CUDA kernels. Keep the linked TVM FFI runtime available through the normal shared-library search path. Modules are loaded before CUDA graph capture, and calls use the ggml CUDA stream.
+
+Select FP8 KV with `-ctk f8_e4m3 -ctv f8_e4m3 -fa on`. Set `GGML_CUDA_DISABLE_FLASHINFER=1` to compare with the existing kernels in the same build. Model quality must be evaluated because Q and the intermediate attention probabilities also use FP8.
+
 Note that this also builds the CPU backend by default. On Windows on ARM, MSVC's
 support for the ARM NEON intrinsics used by the CPU backend may be incomplete, so
 a CUDA build produced entirely with MSVC might have a slower CPU backend. If CPU
