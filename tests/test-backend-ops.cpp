@@ -5711,6 +5711,56 @@ struct test_mul_mat : public test_case {
     }
 };
 
+struct test_mul_mat_fp8_shared : public test_case {
+    const int n;
+    const int count;
+    const int scales;
+    const bool padded;
+    const bool distinct;
+
+    test_mul_mat_fp8_shared(int n, int count, int scales, bool padded = false, bool distinct = false)
+        : n(n), count(count), scales(scales), padded(padded), distinct(distinct) {}
+
+    std::string vars() override { return VARS_TO_STR5(n, count, scales, padded, distinct); }
+    std::string op_desc(ggml_tensor *) override { return "MUL_MAT_FP8_SHARED"; }
+    bool run_whole_graph() override { return true; }
+    double max_nmse_err() override { return 5e-3; }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        GGML_ASSERT(count == 2 || count == 3);
+        ggml_tensor * input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, padded ? 272 : 256, n);
+        if (padded) {
+            input = ggml_view_2d(ctx, input, 256, n, input->nb[1], 0);
+        }
+        ggml_tensor * outputs[3] = {};
+        for (int i = 0; i < count; ++i) {
+            ggml_tensor * x = distinct && i == 1 ? ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 256, n) : input;
+            ggml_tensor * weight = ggml_new_tensor_2d(ctx, GGML_TYPE_F8_E4M3, 256, 128 + i*16);
+            outputs[i] = ggml_mul_mat(ctx, weight, x);
+            if (scales == 1 || (scales == 2 && i != 1)) {
+                ggml_tensor * scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+                ggml_format_name(scale, "weight_scale_%d", i);
+                outputs[i] = ggml_mul(ctx, outputs[i], scale);
+            }
+        }
+        ggml_tensor * out = outputs[count - 1];
+        for (int i = count - 2; i >= 0; --i) {
+            out = ggml_concat(ctx, outputs[i], out, 0);
+        }
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t; t = ggml_get_next_tensor(ctx, t)) {
+            init_tensor_uniform(t);
+            if (strncmp(t->name, "weight_scale_", 13) == 0) {
+                const float scale = t->name[13] == '0' ? 0.001f : 0.004f;
+                ggml_backend_tensor_set(t, &scale, 0, sizeof(scale));
+            }
+        }
+    }
+};
+
 // GGML_HINT_SRC0_IS_HADAMARD
 struct test_mul_mat_hadamard : public test_mul_mat {
     test_mul_mat_hadamard(ggml_type type_a = GGML_TYPE_F32, ggml_type type_b = GGML_TYPE_F32,
@@ -12220,6 +12270,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     for (int n : {1, 2}) {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F8_E4M3, GGML_TYPE_F32, 2, n, 64, {1, 1}, {1, 1}, {0, 1, 2, 3}, 66, 1, false, 0, 0, 1));
     }
+    for (int n : { 1, 8, 17, 128 }) {
+        for (int count : { 2, 3 }) {
+            for (int scales : { 0, 1, 2 }) {
+                test_cases.emplace_back(new test_mul_mat_fp8_shared(n, count, scales));
+            }
+        }
+    }
+    test_cases.emplace_back(new test_mul_mat_fp8_shared(17, 3, 1, true));
+    test_cases.emplace_back(new test_mul_mat_fp8_shared(17, 3, 1, false, true));
     // Native FP8 cuBLASLt requires 16-byte alignment, including each batch pointer.
     for (size_t offset_a : {1, 2, 4, 16}) {
         test_cases.emplace_back(new test_mul_mat(GGML_TYPE_F8_E4M3, GGML_TYPE_F32, 16, 16, 64, {1, 1}, {1, 1}, {0, 1, 2, 3}, 0, 1, false, 17, 0, offset_a));

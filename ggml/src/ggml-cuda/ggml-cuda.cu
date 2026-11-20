@@ -4778,6 +4778,52 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
     return false;
 }
 
+// Return the matmul and optional scalar-scale span without hiding other consumers.
+static int ggml_cuda_match_fp8_projection(const ggml_cgraph * graph, int i, int device, ggml_cuda_fp8_matmul & mat) {
+    const ggml_tensor * mm = graph->nodes[i];
+    if (mm->op != GGML_OP_MUL_MAT || mm->src[0]->type != GGML_TYPE_F8_E4M3 ||
+            mm->src[1]->type != GGML_TYPE_F32 || mm->type != GGML_TYPE_F32 ||
+            ggml_get_op_params_i32(mm, 3) == GGML_PREC_F32 || ggml_get_op_params_i32(mm, 1) != GGML_HINT_NONE ||
+            !ggml_is_matrix(mm->src[0]) || !ggml_is_contiguous(mm->src[0]) ||
+            mm->src[0]->ne[0] % 16 != 0 || mm->src[0]->ne[1] % 16 != 0 || !ggml_is_contiguous(mm)) {
+        return 0;
+    }
+    const auto & info = ggml_cuda_info().devices[device];
+    if (!fp8_mma_hardware_available(info.cc) ||
+            ggml_cuda_should_use_mmvf(mm->src[0], info.cc, info.warp_size, mm->src[1]->ne[1])) {
+        return 0;
+    }
+    mat = { mm->src[0], graph->nodes[i], nullptr };
+    if (i + 1 < graph->n_nodes && graph->nodes[i + 1]->op == GGML_OP_MUL &&
+            ggml_can_fuse(graph, i, { GGML_OP_MUL_MAT, GGML_OP_MUL })) {
+        mat.weight_scale = ggml_cuda_get_mul_mat_scale(graph->nodes[i + 1], mm);
+        if (mat.weight_scale) {
+            mat.dst = graph->nodes[i + 1];
+            return 2;
+        }
+    }
+    return 1;
+}
+
+static int ggml_cuda_match_fp8_shared(const ggml_cgraph * graph, int start, int device,
+        ggml_cuda_fp8_matmul * mats, int * outputs, int & count) {
+    ggml_op ops[6];
+    int end = start;
+    count = 0;
+    while (count < 3 && end < graph->n_nodes) {
+        const int span = ggml_cuda_match_fp8_projection(graph, end, device, mats[count]);
+        if (!span || graph->nodes[end]->src[1] != graph->nodes[start]->src[1]) {
+            break;
+        }
+        for (int j = 0; j < span; ++j) {
+            ops[end + j - start] = graph->nodes[end + j]->op;
+        }
+        end += span;
+        outputs[count++] = end - 1;
+    }
+    return count > 1 && ggml_can_fuse_subgraph(graph, start, end - start, ops, outputs, count) ? end - start : 0;
+}
+
 static bool ggml_cuda_fusion_in_default_stream(ggml_backend_cuda_context & ctx, const ggml_cgraph * graph, int start, int count) {
     for (const auto & [fork, event] : ctx.stream_context().concurrent_events) {
         for (int i = start; i < start + count; ++i) {
@@ -4798,6 +4844,17 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     }
 
     ggml_tensor * node = cgraph->nodes[i];
+
+    if (node->op == GGML_OP_MUL_MAT && node->src[0]->type == GGML_TYPE_F8_E4M3) {
+        ggml_cuda_fp8_matmul mats[3];
+        int outputs[3], count;
+        const int span = ggml_cuda_match_fp8_shared(cgraph, i, cuda_ctx->device, mats, outputs, count);
+        if (span && ggml_cuda_fusion_in_default_stream(*cuda_ctx, cgraph, i, span) &&
+                ggml_cuda_check_fusion_memory_ranges(cgraph, i, span, outputs, count) &&
+                ggml_cuda_mul_mat_fp8_shared(*cuda_ctx, node->src[1], mats, count)) {
+            return span - 1;
+        }
+    }
 
     ggml_cuda_flashinfer_moe_args moe_args;
     int moe_count;
@@ -6013,6 +6070,56 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
         // add alloc deps for performance positive fusions. This may increase the overall compute buffer size.
         // TODO: consolidate fusion paths in graph_optimize and graph_compute
         ggml_cuda_set_device(cuda_ctx->device);
+        for (int i = 0; i < cgraph->n_nodes; ++i) {
+            ggml_cuda_fp8_matmul mat;
+            const int first_span = ggml_cuda_match_fp8_projection(cgraph, i, cuda_ctx->device, mat);
+            if (!first_span) {
+                continue;
+            }
+            int end = i + first_span;
+            int count = 1;
+            for (int j = end; j < std::min(cgraph->n_nodes, i + 96) && count < 3; ++j) {
+                const ggml_tensor * candidate = cgraph->nodes[j];
+                if (candidate->op != GGML_OP_MUL_MAT || candidate->src[1] != cgraph->nodes[i]->src[1]) {
+                    continue;
+                }
+                const int span = ggml_cuda_match_fp8_projection(cgraph, j, cuda_ctx->device, mat);
+                if (!span || mat.src0->op != GGML_OP_NONE || mat.src0->view_src ||
+                        (mat.weight_scale && (mat.weight_scale->op != GGML_OP_NONE || mat.weight_scale->view_src))) {
+                    continue;
+                }
+                const auto root = [](const ggml_tensor * tensor) {
+                    while (tensor && tensor->view_src) {
+                        tensor = tensor->view_src;
+                    }
+                    return tensor;
+                };
+                bool modified = false;
+                for (int k = end; k < j; ++k) {
+                    const ggml_tensor * writer = cgraph->nodes[k];
+                    if (writer->view_src && !ggml_cuda_is_view_or_noop(writer)) {
+                        const ggml_tensor * target = root(writer);
+                        modified |= target == root(candidate->src[1]) || target == root(mat.src0) ||
+                            (mat.weight_scale && target == root(mat.weight_scale));
+                    }
+                }
+                if (modified) {
+                    continue;
+                }
+                // Group independent projections before allocation so their outputs have valid lifetimes.
+                std::rotate(cgraph->nodes + end, cgraph->nodes + j, cgraph->nodes + j + span);
+                end += span;
+                j = end - 1;
+                ++count;
+            }
+            ggml_cuda_fp8_matmul mats[3];
+            int outputs[3];
+            const int span = ggml_cuda_match_fp8_shared(cgraph, i, cuda_ctx->device, mats, outputs, count);
+            if (span) {
+                add_alloc_deps(i, i + span - 1);
+                i += span - 1;
+            }
+        }
         for (int i = 0; i < cgraph->n_nodes; ++i) {
             ggml_cuda_flashinfer_moe_args args;
             int count;
